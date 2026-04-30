@@ -171,7 +171,7 @@ class TermuxIdaMcpBridge(private val termuxBridge: TermuxBridge) {
     /**
      * 로그 가져오기
      */
-    fun getLog(""): String {
+    fun getLog(cmdId: String = ""): String {
         return termuxBridge.getLog("")
     }
 }
