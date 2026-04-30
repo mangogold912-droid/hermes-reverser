@@ -78,7 +78,7 @@ class TermuxIdaMcpBridge(private val termuxBridge: TermuxBridge) {
         script.append("echo '=== Setup Complete ===' >> ~/hermes_ida.log\n")
         script.append("echo 'MCP Server: http://" + MCP_HOST + ":" + MCP_PORT + "' >> ~/hermes_ida.log\n")
 
-        return termuxBridge.runScript(script.toString(), "setup_ida_mcp.sh")
+        return termuxBridge.runCommand("setup_ida_mcp_sh", script.toString())
     }
 
     /**
@@ -86,7 +86,7 @@ class TermuxIdaMcpBridge(private val termuxBridge: TermuxBridge) {
      */
     fun checkMcpServer(): Boolean {
         val script = "curl -s http://" + MCP_HOST + ":" + MCP_PORT + " > /dev/null 2>&1 && echo RUNNING || echo STOPPED"
-        termuxBridge.runCommand(script)
+        termuxBridge.runCommand("check_mcp_server", script)
         return true
     }
 
@@ -95,7 +95,7 @@ class TermuxIdaMcpBridge(private val termuxBridge: TermuxBridge) {
      */
     fun stopMcpServer(): Boolean {
         val script = "pkill -f mcp_server.py; echo Stopped"
-        return termuxBridge.runCommand(script)
+        return termuxBridge.runCommand("stop_mcp_server", script)
     }
 
     /**
@@ -107,7 +107,7 @@ class TermuxIdaMcpBridge(private val termuxBridge: TermuxBridge) {
         script.append("  -H 'Content-Type: application/json' \\\n")
         script.append("  -d '{\"method\":\"load_file\",\"params\":{\"path\":\"" + filePath + "\"}}' \\\n")
         script.append("  > /dev/null 2>&1")
-        return termuxBridge.runCommand(script.toString())
+        return termuxBridge.runCommand("ida_mcp_setup", script.toString())
     }
 
     /**
@@ -119,7 +119,7 @@ class TermuxIdaMcpBridge(private val termuxBridge: TermuxBridge) {
         script.append("  -H 'Content-Type: application/json' \\\n")
         script.append("  -d '{\"method\":\"get_functions\",\"params\":{}}' \\\n")
         script.append("  > /sdcard/HermesReverser/ida_functions.json 2>&1")
-        return termuxBridge.runCommand(script.toString())
+        return termuxBridge.runCommand("ida_mcp_setup", script.toString())
     }
 
     /**
@@ -131,7 +131,7 @@ class TermuxIdaMcpBridge(private val termuxBridge: TermuxBridge) {
         script.append("  -H 'Content-Type: application/json' \\\n")
         script.append("  -d '{\"method\":\"decompile\",\"params\":{\"name\":\"" + funcName + "\"}}' \\\n")
         script.append("  > /sdcard/HermesReverser/ida_decompile_" + funcName + ".txt 2>&1")
-        return termuxBridge.runCommand(script.toString())
+        return termuxBridge.runCommand("ida_mcp_setup", script.toString())
     }
 
     /**
@@ -165,7 +165,7 @@ class TermuxIdaMcpBridge(private val termuxBridge: TermuxBridge) {
         script.append("echo 'All analyses running in background' >> ~/hermes_analysis.log\n")
         script.append("echo 'Check \$OUT/ for results' >> ~/hermes_analysis.log\n")
 
-        return termuxBridge.runScript(script.toString(), "full_analysis.sh")
+        return termuxBridge.runCommand("full_analysis_sh", script.toString())
     }
 
     /**
