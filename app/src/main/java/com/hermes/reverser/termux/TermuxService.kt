@@ -33,7 +33,7 @@ class TermuxService : Service() {
 
         val command = intent?.getStringExtra("command")
         if (command != null) {
-            Log.i(TAG, "Executing: $command")
+            Log.i(TAG, "Executing: " + command)
         }
 
         return START_STICKY
@@ -65,8 +65,5 @@ class TermuxService : Service() {
             .setSmallIcon(android.R.drawable.ic_menu_preferences)
             .setOngoing(true)
             .build()
-    }
-}
-ld()
     }
 }
