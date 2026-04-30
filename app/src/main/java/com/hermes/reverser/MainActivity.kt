@@ -32,6 +32,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnSettings: Button
     private lateinit var btnTermux: Button
     private lateinit var btnExternalIda: Button
+    private lateinit var btnTerminal: Button
 
     private var selectedFileUri: Uri? = null
     private var selectedFileName: String = ""
@@ -56,6 +57,7 @@ class MainActivity : AppCompatActivity() {
         btnSettings = findViewById(R.id.btnSettings)
         btnTermux = findViewById(R.id.btnTermux)
         btnExternalIda = findViewById(R.id.btnExternalIda)
+        btnTerminal = findViewById(R.id.btnTerminal)
 
         btnSelectFile.setOnClickListener { pickFile() }
         btnAllFiles.setOnClickListener { requestAllFilesAccess() }
@@ -64,6 +66,7 @@ class MainActivity : AppCompatActivity() {
         btnSettings.setOnClickListener { openSettings() }
         btnTermux.setOnClickListener { openTermuxSetup() }
         btnExternalIda.setOnClickListener { openExternalIda() }
+        btnTerminal.setOnClickListener { openTerminal() }
     }
 
     private fun checkPermissions() {
@@ -185,6 +188,10 @@ class MainActivity : AppCompatActivity() {
 
     private fun openTermuxSetup() {
         startActivity(Intent(this, TermuxSetupActivity::class.java))
+    }
+
+    private fun openTerminal() {
+        startActivity(Intent(this, TerminalActivity::class.java))
     }
 
     private fun openExternalIda() {
