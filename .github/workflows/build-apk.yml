@@ -8,6 +8,8 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -29,14 +31,56 @@ jobs:
       - name: Build Debug APK
         run: gradle assembleDebug --stacktrace
 
-      - name: Upload APK
+      - name: Prepare APK
+        if: success()
+        run: |
+          mkdir -p release
+          cp app/build/outputs/apk/debug/*.apk release/HermesReverser.apk
+
+      - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         if: success()
         with:
-          name: HermesReverser-Step1
-          path: app/build/outputs/apk/debug/*.apk
-          retention-days: 30
+          name: HermesReverser-APK
+          path: release/*.apk
+          retention-days: 90
+
+      - name: Generate Release Tag
+        if: success() && github.event_name == 'push'
+        id: tag
+        run: echo "tag_name=v1.0.0-$(date +%Y%m%d-%H%M%S)" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        if: success() && github.event_name == 'push'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag_name }}
+          name: "Hermes Reverser v1.0.0"
+          body: |
+            ## Hermes Reverser — Full Release
+
+            ### Features
+            - **8 AI Parallel Analysis**: OpenAI, Kimi, Qwen, Gemini, Claude, DeepSeek, Ollama, SuperNinja
+            - **IDA Pro MCP Client**: External PC integration via TCP/JSON-RPC
+            - **Termux Integration**: Auto-install Debian + IDA Linux on Android
+            - **C++ Native Engine**: JNI disassembler, header analyzer, string extractor
+            - **AI Chat**: OpenClaw-style multi-platform chat interface
+            - **Reinforcement Learning**: Auto-ranking and prompt optimization
+            - **MANAGE_EXTERNAL_STORAGE**: Full file system access on Android 11+
+
+            ### Installation
+            1. Download `HermesReverser.apk`
+            2. Enable "Install unknown apps" in Settings
+            3. Grant "All files access" permission on first launch
+            4. Enter API keys in Settings for AI platforms
+
+            ### Permissions
+            - `MANAGE_EXTERNAL_STORAGE` — Access all files
+            - `INTERNET` — AI API calls
+            - `FOREGROUND_SERVICE` — Background analysis
+          files: release/*.apk
+          make_latest: true
 
       - name: Show APK info
         if: success()
-        run: ls -lh app/build/outputs/apk/debug/*.apk
+        run: ls -lh release/*.apk
