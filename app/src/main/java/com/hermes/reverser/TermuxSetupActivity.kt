@@ -123,7 +123,7 @@ class TermuxSetupActivity : AppCompatActivity() {
                 tv.setTextColor(bridge.statusColor(status))
             }
             when (status) {
-                TermuxBridge.Status.RUNNING, TermuxBridge.Status.PENDING -> running++
+                TermuxBridge.Status.RUNNING, TermuxBridge.Status.READY -> running++
                 TermuxBridge.Status.COMPLETED -> done++
                 TermuxBridge.Status.FAILED -> failed++
                 else -> {}
