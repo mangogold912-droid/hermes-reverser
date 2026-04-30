@@ -1,11 +1,13 @@
 package com.hermes.reverser
 
+import android.content.Intent
 import android.graphics.Color
 import android.os.Bundle
 import android.widget.*
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import com.hermes.reverser.termux.TermuxBridge
+import com.hermes.reverser.termux.TermuxIdaMcpBridge
 
 /**
  * Termux 연동 Activity — 이미 설치된 Termux와 작동
@@ -14,6 +16,7 @@ class TermuxSetupActivity : AppCompatActivity() {
 
     private lateinit var tvLog: TextView
     private lateinit var bridge: TermuxBridge
+    private lateinit var idaMcpBridge: TermuxIdaMcpBridge
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -24,13 +27,14 @@ class TermuxSetupActivity : AppCompatActivity() {
             setPadding(24, 24, 24, 24)
         }
 
-        // 상태 표시
+        bridge = TermuxBridge(this)
+        idaMcpBridge = TermuxIdaMcpBridge(bridge)
+
         val tvStatus = TextView(this).apply {
             textSize = 16f
             setPadding(0, 0, 0, 16)
         }
 
-        bridge = TermuxBridge(this)
         val installed = bridge.isTermuxInstalled()
         tvStatus.text = "Termux: " + if (installed) "INSTALLED" else "NOT INSTALLED"
         tvStatus.setTextColor(if (installed) Color.GREEN else Color.RED)
@@ -50,11 +54,23 @@ class TermuxSetupActivity : AppCompatActivity() {
             }
             layout.addView(tvHelp)
         } else {
-            // 버튼들
-            val btnDebian = Button(this).apply {
-                text = "Install Debian"
+            val btnFullSetup = Button(this).apply {
+                text = "1. Full IDA+MCP Auto-Setup"
                 setOnClickListener {
-                    if (bridge.installDebian()) {
+                    if (idaMcpBridge.setupFullIdaMcpEnvironment()) {
+                        log("IDA+MCP auto-setup started...")
+                        log("Check log for progress")
+                    } else {
+                        log("Failed to start setup")
+                    }
+                }
+            }
+            layout.addView(btnFullSetup)
+
+            val btnDebian = Button(this).apply {
+                text = "2. Install Debian Only"
+                setOnClickListener {
+                    if (bridge.runCommand(TermuxBridge().getDebianInstallScript())) {
                         log("Debian installation started...")
                     } else {
                         log("Failed to start Debian install")
@@ -63,23 +79,11 @@ class TermuxSetupActivity : AppCompatActivity() {
             }
             layout.addView(btnDebian)
 
-            val btnIdaMcp = Button(this).apply {
-                text = "Install IDA MCP Server"
-                setOnClickListener {
-                    if (bridge.installIdaMcpInDebian()) {
-                        log("IDA MCP installation started...")
-                    } else {
-                        log("Failed to start IDA MCP install")
-                    }
-                }
-            }
-            layout.addView(btnIdaMcp)
-
             val btnStartMcp = Button(this).apply {
-                text = "Start IDA MCP Server"
+                text = "3. Start IDA MCP Server"
                 setOnClickListener {
-                    if (bridge.startIdaMcpServer()) {
-                        log("IDA MCP Server started on port 5000")
+                    if (idaMcpBridge.setupFullIdaMcpEnvironment()) {
+                        log("IDA MCP Server starting...")
                         showConnectDialog()
                     } else {
                         log("Failed to start MCP server")
@@ -89,7 +93,7 @@ class TermuxSetupActivity : AppCompatActivity() {
             layout.addView(btnStartMcp)
 
             val btnCapstone = Button(this).apply {
-                text = "Install Capstone"
+                text = "4. Install Capstone"
                 setOnClickListener {
                     if (bridge.installCapstone()) {
                         log("Capstone installation started...")
@@ -107,7 +111,6 @@ class TermuxSetupActivity : AppCompatActivity() {
             layout.addView(btnRefresh)
         }
 
-        // 로그 출력
         tvLog = TextView(this).apply {
             text = "Log:\n"
             textSize = 12f
@@ -125,17 +128,10 @@ class TermuxSetupActivity : AppCompatActivity() {
     }
 
     private fun refreshLog() {
-        tvLog.text = bridge.getLog()
+        tvLog.text = idaMcpBridge.getLog()
     }
 
     private fun showConnectDialog() {
         AlertDialog.Builder(this)
             .setTitle("IDA MCP Server Running")
-            .setMessage("Now go to Settings and connect to:\nHost: 127.0.0.1\nPort: 5000")
-            .setPositiveButton("Open Settings") { _, _ ->
-                startActivity(Intent(this, SettingsActivity::class.java))
-            }
-            .setNegativeButton("OK", null)
-            .show()
-    }
-}
+            .setMessage("Now go to Settings and connect to:\nHost:
