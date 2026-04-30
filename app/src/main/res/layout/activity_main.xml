@@ -3,23 +3,116 @@
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:orientation="vertical"
-    android:gravity="center"
+    android:padding="16dp"
     android:background="#0f172a">
 
     <TextView
-        android:layout_width="wrap_content"
+        android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:text="Hermes Reverser"
         android:textSize="28sp"
         android:textStyle="bold"
-        android:textColor="#38bdf8" />
+        android:textColor="#38bdf8"
+        android:gravity="center"
+        android:padding="16dp" />
 
     <TextView
-        android:layout_width="wrap_content"
+        android:id="@+id/tvStatus"
+        android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="Building... Step 1"
+        android:text="Ready"
+        android:textColor="#94a3b8"
         android:textSize="14sp"
-        android:textColor="#64748b"
-        android:paddingTop="8dp" />
+        android:gravity="center"
+        android:padding="8dp" />
 
+    <TextView
+        android:id="@+id/tvFileInfo"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="No file selected"
+        android:textColor="#cbd5e1"
+        android:textSize="12sp"
+        android:padding="12dp"
+        android:background="#1e293b" />
+
+    <Button
+        android:id="@+id/btnSelectFile"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Select File (SAF)"
+        android:backgroundTint="#0ea5e9" />
+
+    <Button
+        android:id="@+id/btnAllFiles"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Grant All Files Access"
+        android:backgroundTint="#8b5cf6" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal">
+
+        <Button
+            android:id="@+id/btnAnalyze"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="Analyze"
+            android:backgroundTint="#10b981" />
+
+        <Button
+            android:id="@+id/btnChat"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="AI Chat"
+            android:backgroundTint="#f59e0b" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal">
+
+        <Button
+            android:id="@+id/btnTermux"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="IDA Mobile (Termux)"
+            android:backgroundTint="#ec4899" />
+
+        <Button
+            android:id="@+id/btnExternalIda"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="External IDA"
+            android:backgroundTint="#6366f1" />
+    </LinearLayout>
+
+    <Button
+        android:id="@+id/btnSettings"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Settings"
+        android:backgroundTint="#475569" />
+
+    <ScrollView
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:background="#020617">
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="A: Termux+Debian+IDA Linux\\nB: Native Capstone Engine\\nC: External PC IDA + MCP\\nAll integrated with 8 AI parallel analysis"
+            android:textColor="#64748b"
+            android:textSize="11sp"
+            android:padding="16dp" />
+    </ScrollView>
 </LinearLayout>
