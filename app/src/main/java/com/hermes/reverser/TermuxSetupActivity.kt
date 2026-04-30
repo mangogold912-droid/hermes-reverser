@@ -50,49 +50,42 @@ class TermuxSetupActivity : AppCompatActivity() {
             tvHelp.setPadding(0, 8, 0, 16)
             layout.addView(tvHelp)
         } else {
+            val tvHint = TextView(this)
+            tvHint.text = "Tap a button to start. If it fails, Termux will open automatically."
+            tvHint.textSize = 12f
+            tvHint.setPadding(0, 0, 0, 8)
+            layout.addView(tvHint)
+
             val btnFullSetup = Button(this)
             btnFullSetup.text = "1. Full IDA+MCP Auto-Setup"
             btnFullSetup.setOnClickListener {
-                if (idaMcpBridge.setupFullIdaMcpEnvironment()) {
-                    log("IDA+MCP auto-setup started...")
-                } else {
-                    log("Failed to start setup")
-                }
+                val result = idaMcpBridge.setupFullIdaMcpEnvironment()
+                log("Setup: " + if (result) "Command sent" else "Fallback - Termux opened")
             }
             layout.addView(btnFullSetup)
 
             val btnDebian = Button(this)
-            btnDebian.text = "2. Install Debian Only"
+            btnDebian.text = "2. Install Debian"
             btnDebian.setOnClickListener {
-                val cmd = "pkg update -y && pkg upgrade -y && pkg install proot-distro -y && proot-distro install debian"
-                if (bridge.runCommand(cmd)) {
-                    log("Debian installation started...")
-                } else {
-                    log("Failed to start Debian install")
-                }
+                val result = bridge.installDebian()
+                log("Debian: " + if (result) "Command sent" else "Fallback - Termux opened")
             }
             layout.addView(btnDebian)
 
             val btnStartMcp = Button(this)
             btnStartMcp.text = "3. Start IDA MCP Server"
             btnStartMcp.setOnClickListener {
-                if (idaMcpBridge.setupFullIdaMcpEnvironment()) {
-                    log("IDA MCP Server starting...")
-                    showConnectDialog()
-                } else {
-                    log("Failed to start MCP server")
-                }
+                val result = idaMcpBridge.setupFullIdaMcpEnvironment()
+                log("MCP: " + if (result) "Command sent" else "Fallback - Termux opened")
+                if (result) showConnectDialog()
             }
             layout.addView(btnStartMcp)
 
             val btnCapstone = Button(this)
             btnCapstone.text = "4. Install Capstone"
             btnCapstone.setOnClickListener {
-                if (bridge.installCapstone()) {
-                    log("Capstone installation started...")
-                } else {
-                    log("Failed to install Capstone")
-                }
+                val result = bridge.installCapstone()
+                log("Capstone: " + if (result) "Command sent" else "Fallback - Termux opened")
             }
             layout.addView(btnCapstone)
 
@@ -118,13 +111,13 @@ class TermuxSetupActivity : AppCompatActivity() {
     }
 
     private fun refreshLog() {
-        tvLog.text = idaMcpBridge.getLog()
+        tvLog.text = "Log:\n" + bridge.getLog()
     }
 
     private fun showConnectDialog() {
         val builder = AlertDialog.Builder(this)
-        builder.setTitle("IDA MCP Server Running")
-        builder.setMessage("Go to Settings and connect to MCP Server")
+        builder.setTitle("IDA MCP Server Starting")
+        builder.setMessage("Server is starting in background. Check log for progress.\n\nGo to Settings to connect:\nHost: 127.0.0.1\nPort: 5000")
         builder.setPositiveButton("Open Settings") { _, _ ->
             val intent = Intent(this, SettingsActivity::class.java)
             startActivity(intent)
