@@ -1,119 +1,141 @@
 package com.hermes.reverser
 
+import android.graphics.Color
 import android.os.Bundle
-import android.widget.Button
-import android.widget.ScrollView
-import android.widget.TextView
+import android.widget.*
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
-import com.hermes.reverser.termux.TermuxInstaller
+import com.hermes.reverser.termux.TermuxBridge
 
 /**
- * Termux + Debian + IDA Linux 설정 Activity
+ * Termux 연동 Activity — 이미 설치된 Termux와 작동
  */
 class TermuxSetupActivity : AppCompatActivity() {
 
     private lateinit var tvLog: TextView
-    private lateinit var btnInstallTermux: Button
-    private lateinit var btnInstallDebian: Button
-    private lateinit var btnInstallIda: Button
-    private lateinit var btnStartMcp: Button
-    private lateinit var installer: TermuxInstaller
+    private lateinit var bridge: TermuxBridge
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         val scrollView = ScrollView(this)
-        val layout = android.widget.LinearLayout(this).apply {
-            orientation = android.widget.LinearLayout.VERTICAL
-            setPadding(20, 20, 20, 20)
+        val layout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(24, 24, 24, 24)
         }
 
+        // 상태 표시
+        val tvStatus = TextView(this).apply {
+            textSize = 16f
+            setPadding(0, 0, 0, 16)
+        }
+
+        bridge = TermuxBridge(this)
+        val installed = bridge.isTermuxInstalled()
+        tvStatus.text = "Termux: " + if (installed) "INSTALLED" else "NOT INSTALLED"
+        tvStatus.setTextColor(if (installed) Color.GREEN else Color.RED)
+        layout.addView(tvStatus)
+
+        if (!installed) {
+            val btnInstall = Button(this).apply {
+                text = "Go to Termux F-Droid"
+                setOnClickListener { bridge.openTermuxStore() }
+            }
+            layout.addView(btnInstall)
+
+            val tvHelp = TextView(this).apply {
+                text = "1. Install Termux from F-Droid (not Play Store)\n2. Return to this app"
+                textSize = 14f
+                setPadding(0, 8, 0, 16)
+            }
+            layout.addView(tvHelp)
+        } else {
+            // 버튼들
+            val btnDebian = Button(this).apply {
+                text = "Install Debian"
+                setOnClickListener {
+                    if (bridge.installDebian()) {
+                        log("Debian installation started...")
+                    } else {
+                        log("Failed to start Debian install")
+                    }
+                }
+            }
+            layout.addView(btnDebian)
+
+            val btnIdaMcp = Button(this).apply {
+                text = "Install IDA MCP Server"
+                setOnClickListener {
+                    if (bridge.installIdaMcpInDebian()) {
+                        log("IDA MCP installation started...")
+                    } else {
+                        log("Failed to start IDA MCP install")
+                    }
+                }
+            }
+            layout.addView(btnIdaMcp)
+
+            val btnStartMcp = Button(this).apply {
+                text = "Start IDA MCP Server"
+                setOnClickListener {
+                    if (bridge.startIdaMcpServer()) {
+                        log("IDA MCP Server started on port 5000")
+                        showConnectDialog()
+                    } else {
+                        log("Failed to start MCP server")
+                    }
+                }
+            }
+            layout.addView(btnStartMcp)
+
+            val btnCapstone = Button(this).apply {
+                text = "Install Capstone"
+                setOnClickListener {
+                    if (bridge.installCapstone()) {
+                        log("Capstone installation started...")
+                    } else {
+                        log("Failed to install Capstone")
+                    }
+                }
+            }
+            layout.addView(btnCapstone)
+
+            val btnRefresh = Button(this).apply {
+                text = "Refresh Log"
+                setOnClickListener { refreshLog() }
+            }
+            layout.addView(btnRefresh)
+        }
+
+        // 로그 출력
         tvLog = TextView(this).apply {
-            text = "Termux Setup\n"
-            textSize = 14f
+            text = "Log:\n"
+            textSize = 12f
+            setPadding(0, 16, 0, 0)
             setTextIsSelectable(true)
         }
-
-        btnInstallTermux = Button(this).apply {
-            text = "1. Install Termux"
-            setOnClickListener { installTermux() }
-        }
-
-        btnInstallDebian = Button(this).apply {
-            text = "2. Install Debian"
-            setOnClickListener { installDebian() }
-        }
-
-        btnInstallIda = Button(this).apply {
-            text = "3. Install IDA MCP Server"
-            setOnClickListener { installIdaMcp() }
-        }
-
-        btnStartMcp = Button(this).apply {
-            text = "4. Start MCP Server"
-            setOnClickListener { startMcpServer() }
-        }
-
         layout.addView(tvLog)
-        layout.addView(btnInstallTermux)
-        layout.addView(btnInstallDebian)
-        layout.addView(btnInstallIda)
-        layout.addView(btnStartMcp)
 
         scrollView.addView(layout)
         setContentView(scrollView)
-
-        installer = TermuxInstaller(this)
-        log("Termux installed: " + installer.isTermuxInstalled())
     }
 
     private fun log(message: String) {
         tvLog.append(message + "\n")
     }
 
-    private fun installTermux() {
-        if (installer.isTermuxInstalled()) {
-            log("Termux already installed!")
-            return
-        }
-        val downloadId = installer.downloadTermux()
-        log("Downloading Termux... ID: $downloadId")
+    private fun refreshLog() {
+        tvLog.text = bridge.getLog()
     }
 
-    private fun installDebian() {
-        if (!installer.isTermuxInstalled()) {
-            log("Please install Termux first!")
-            return
-        }
-        val script = installer.getDebianInstallScript()
-        val intent = installer.createTermuxIntent(script)
-        try {
-            startService(intent)
-            log("Debian installation started in background")
-        } catch (e: Exception) {
-            log("Error: " + e.message)
-        }
-    }
-
-    private fun installIdaMcp() {
-        val script = installer.runInDebian(installer.getIdaLinuxInstallScript())
-        val intent = installer.createTermuxIntent(script)
-        try {
-            startService(intent)
-            log("IDA MCP Server installation started")
-        } catch (e: Exception) {
-            log("Error: " + e.message)
-        }
-    }
-
-    private fun startMcpServer() {
-        val script = installer.runInDebian(installer.getIdaMcpServerScript())
-        val intent = installer.createTermuxIntent(script)
-        try {
-            startService(intent)
-            log("IDA MCP Server started on port 5000")
-        } catch (e: Exception) {
-            log("Error: " + e.message)
-        }
+    private fun showConnectDialog() {
+        AlertDialog.Builder(this)
+            .setTitle("IDA MCP Server Running")
+            .setMessage("Now go to Settings and connect to:\nHost: 127.0.0.1\nPort: 5000")
+            .setPositiveButton("Open Settings") { _, _ ->
+                startActivity(Intent(this, SettingsActivity::class.java))
+            }
+            .setNegativeButton("OK", null)
+            .show()
     }
 }
