@@ -104,7 +104,7 @@ class MultiAnalyzer(context: Context) {
         }
 
         // 2. Termux 분석기 (설치된 경우만)
-        if (termuxBridge.isTermuxInstalled()) {
+        if (termuxBridge.isInstalled()) {
             for (analyzer in AnalyzerType.termux()) {
                 jobs.add(async(Dispatchers.IO) {
                     val result = runTermuxAnalyzer(analyzer, filePath, bytes)
@@ -217,7 +217,7 @@ class MultiAnalyzer(context: Context) {
                 append("echo '[DONE]' >> /sdcard/HermesReverser/results/${type.name.lowercase()}.txt\n")
             }
 
-            val success = termuxBridge.runCommand(type.name, script)
+            val success = termuxBridge.runTracked(type.name.lowercase(), script)
             AnalyzerResult(
                 type = type,
                 success = success,
@@ -327,7 +327,7 @@ class MultiAnalyzer(context: Context) {
         }
 
         // Termux 분석기는 설치 확인
-        if (termuxBridge.isTermuxInstalled()) {
+        if (termuxBridge.isInstalled()) {
             for (analyzer in AnalyzerType.termux()) {
                 val cmd = when (analyzer) {
                     AnalyzerType.RADARE2 -> "which r2"
@@ -338,7 +338,7 @@ class MultiAnalyzer(context: Context) {
                     else -> "false"
                 }
                 val script = "$cmd >/dev/null 2>&1 && echo 'INSTALLED' || echo 'NOT_INSTALLED'"
-                termuxBridge.runCommand(analyzer.name, script)
+                termuxBridge.runTracked(analyzer.name.lowercase(), script)
                 // 비동기 결과는 파일로 확인
                 results[analyzer] = false // 기본값, 실제 확인은 별도
             }
