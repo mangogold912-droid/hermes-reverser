@@ -14,7 +14,8 @@ import com.hermes.reverser.termux.TermuxBridge
 import com.hermes.reverser.termux.TermuxIdaMcpBridge
 
 /**
- * Termux 설정 Activity — 버튼 누륵면 Termux 자동 실행 + 상태 표시
+ * Termux 설정 Activity
+ * 버튼 누륵면 Termux 자동 실행 + 실시간 상태 표시
  */
 class TermuxSetupActivity : AppCompatActivity() {
 
@@ -23,8 +24,7 @@ class TermuxSetupActivity : AppCompatActivity() {
     private lateinit var idaMcpBridge: TermuxIdaMcpBridge
     private lateinit var tvLog: TextView
 
-    // 버튼과 상태 뷰를 매핑
-    private val buttonConfigs = listOf(
+    private val buttons = listOf(
         Triple("setup_full", "1. 전체 IDA+MCP 자동설치",
             "pkg update -y && pkg upgrade -y && pkg install proot-distro -y && proot-distro install debian && pkg install radare2 jadx apktool -y && pip3 install capstone frida jnitrace"),
         Triple("debian", "2. Debian 설치",
@@ -53,7 +53,6 @@ class TermuxSetupActivity : AppCompatActivity() {
         bridge = TermuxBridge(this)
         idaMcpBridge = TermuxIdaMcpBridge(bridge)
 
-        // Termux 설치 상태
         val tvInstall = TextView(this)
         tvInstall.textSize = 18f
         val installed = bridge.isInstalled()
@@ -67,57 +66,41 @@ class TermuxSetupActivity : AppCompatActivity() {
             btn.setOnClickListener { bridge.openStore() }
             root.addView(btn)
         } else {
-            // 설명 텍스트
-            val tvHint = TextView(this)
-            tvHint.text = "\ubc84\ud2bc \ub20c\ub7ec\ubbf8\uc9d1 \ucc98\ub9ac \u2192 Termux \uc790\ub3d9 \uc2e4\ud589 \u2192 \ubc31\uadf8\ub77c\uc6b4\ub4dc \uba85\ub839 \uc2e4\ud589"
-            tvHint.setTextColor(0xFFAAAAAA.toInt())
-            tvHint.setPadding(0, 8, 0, 16)
-            root.addView(tvHint)
+            val hint = TextView(this)
+            hint.text = "\ubc84\ud2bc \ud074\ub9ad \u2192 Termux \uc790\ub3d9 \uc2e4\ud589 \u2192 \uc0c1\ud0dc \ud45c\uc2dc"
+            hint.setTextColor(0xFFAAAAAA.toInt())
+            root.addView(hint)
 
-            // 각 버튼 + 상태 표시 생성
-            for ((cmdId, label, command) in buttonConfigs) {
-                // 버튼
+            for ((cmdId, label, command) in buttons) {
                 val btn = Button(this)
                 btn.text = label
                 btn.setOnClickListener {
                     bridge.runTracked(cmdId, command)
-                    Toast.makeText(this, "Termux\uc5d0\uc11c \uc2e4\ud589\uc911...", Toast.LENGTH_SHORT).show()
-                    updateOneStatus(cmdId)
+                    Toast.makeText(this, "Termux\uc5d0\uc11c \uc2e4\ud589 \uc2dc\ub3c4...", Toast.LENGTH_SHORT).show()
                 }
                 root.addView(btn)
 
-                // 상태 표시 TextView
-                val tvStatus = TextView(this)
-                tvStatus.textSize = 13f
-                tvStatus.setPadding(16, 4, 16, 16)
-                root.addView(tvStatus)
-                statusViews[cmdId] = tvStatus
+                val tv = TextView(this)
+                tv.textSize = 13f
+                tv.setPadding(16, 4, 16, 16)
+                root.addView(tv)
+                statusViews[cmdId] = tv
             }
 
-            // 구분선
             val sep = TextView(this)
             sep.text = "\n\u2500\u2500\u2500 \uc804\uccb4 \uc694\uc57d \u2500\u2500\u2500"
             sep.setTextColor(0xFF555555.toInt())
             root.addView(sep)
 
-            // 요약 상태
             val tvSummary = TextView(this)
             tvSummary.textSize = 14f
-            tvSummary.setPadding(0, 8, 0, 8)
             root.addView(tvSummary)
             statusViews["summary"] = tvSummary
 
-            // 새로고침 버튼
             val btnRefresh = Button(this)
             btnRefresh.text = "\uc0c8\ub85c\uace0\uce68"
             btnRefresh.setOnClickListener { refreshAll() }
             root.addView(btnRefresh)
-
-            // 로그 영역
-            val tvLogLabel = TextView(this)
-            tvLogLabel.text = "\n\u2500\u2500\u2500 \ub85c\uadf8 \u2500\u2500\u2500"
-            tvLogLabel.setTextColor(0xFF555555.toInt())
-            root.addView(tvLogLabel)
 
             tvLog = TextView(this)
             tvLog.textSize = 11f
@@ -125,7 +108,6 @@ class TermuxSetupActivity : AppCompatActivity() {
             tvLog.setTextIsSelectable(true)
             root.addView(tvLog)
 
-            // 폴 시작
             startPolling()
         }
 
@@ -133,37 +115,21 @@ class TermuxSetupActivity : AppCompatActivity() {
         setContentView(scroll)
     }
 
-    /**
-     * 하나의 상태만 갱신
-     */
-    private fun updateOneStatus(cmdId: String) {
-        val (status, msg) = bridge.getStatus(cmdId)
-        val tv = statusViews[cmdId] ?: return
-
-        val icon = when (status) {
-            TermuxBridge.Status.IDLE -> "\u25ef"
-            TermuxBridge.Status.PENDING -> "\u27f3"
-            TermuxBridge.Status.RUNNING -> "\u25b6"
-            TermuxBridge.Status.COMPLETED -> "\u2714"
-            TermuxBridge.Status.FAILED -> "\u2716"
-        }
-        val text = bridge.statusText(status)
-        tv.text = "  $icon  $text" + if (msg.isNotEmpty()) " ($msg)" else ""
-        tv.setTextColor(bridge.statusColor(status))
-    }
-
-    /**
-     * 전체 상태 갱신
-     */
     private fun refreshAll() {
         var running = 0
         var done = 0
         var failed = 0
 
-        for ((cmdId, _, _) in buttonConfigs) {
-            updateOneStatus(cmdId)
-            val (s, _) = bridge.getStatus(cmdId)
-            when (s) {
+        for ((cmdId, label, _) in buttons) {
+            val (status, msg) = bridge.getStatus(cmdId)
+            val tv = statusViews[cmdId]
+            if (tv != null) {
+                val icon = bridge.statusIcon(status)
+                val text = bridge.statusText(status)
+                tv.text = "  $icon  $text" + if (msg.isNotEmpty()) "\n     $msg" else ""
+                tv.setTextColor(bridge.statusColor(status))
+            }
+            when (status) {
                 TermuxBridge.Status.RUNNING, TermuxBridge.Status.PENDING -> running++
                 TermuxBridge.Status.COMPLETED -> done++
                 TermuxBridge.Status.FAILED -> failed++
@@ -171,7 +137,6 @@ class TermuxSetupActivity : AppCompatActivity() {
             }
         }
 
-        // 요약
         val summary = statusViews["summary"]
         if (summary != null) {
             val sb = StringBuilder()
@@ -188,26 +153,19 @@ class TermuxSetupActivity : AppCompatActivity() {
             })
         }
 
-        // 로그
         val sb = StringBuilder("\ub85c\uadf8:\n")
-        for ((cmdId, label, _) in buttonConfigs) {
+        for ((cmdId, label, _) in buttons) {
             val log = bridge.getLog(cmdId)
             if (log.isNotEmpty()) {
-                sb.append("\n[$label]\n${log.take(300)}\n")
+                sb.append("\n[$label]\n${log.take(500)}\n")
             }
         }
         tvLog.text = sb.toString()
     }
 
-    /**
-     * 2초마다 상태 폴
-     */
     private fun startPolling() {
         handler.postDelayed(object : Runnable {
-            override fun run() {
-                refreshAll()
-                handler.postDelayed(this, 2000)
-            }
+            override fun run() { refreshAll(); handler.postDelayed(this, 2000) }
         }, 500)
     }
 
