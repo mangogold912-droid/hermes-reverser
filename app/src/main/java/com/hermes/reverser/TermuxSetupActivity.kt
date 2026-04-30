@@ -1,38 +1,49 @@
 package com.hermes.reverser
 
+import android.content.Intent
 import android.graphics.Color
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
-import com.hermes.reverser.termux.TermuxBridge
-import com.hermes.reverser.termux.TermuxIdaMcpBridge
 
+/**
+ * Termux 설정 Activity — 앱 내장 터미널에서 자동 실행
+ *
+ * 버튼 클릭 → TerminalActivity 열림 → 명령 자동 실행
+ * Termux 없이 앱 안에서 모든 것 처리
+ */
 class TermuxSetupActivity : AppCompatActivity() {
 
-    private val handler = Handler(Looper.getMainLooper())
-    private lateinit var bridge: TermuxBridge
-    private lateinit var idaMcpBridge: TermuxIdaMcpBridge
-    private lateinit var tvLog: TextView
-    private val statusViews = mutableMapOf<String, TextView>()
-
-    private val buttons = listOf(
-        Triple("setup_full", "1. Full IDA+MCP Auto-Setup",
-            "pkg update -y && pkg upgrade -y && pkg install proot-distro -y && proot-distro install debian && pkg install radare2 jadx apktool -y && pip3 install capstone frida jnitrace"),
-        Triple("debian", "2. Install Debian",
-            "pkg update -y && pkg install proot-distro -y && proot-distro install debian"),
-        Triple("mcp_server", "3. Start IDA MCP Server",
-            "pkill -f mcp_server.py 2>/dev/null; sleep 1; proot-distro login debian -- bash -c 'mkdir -p /opt/ida-mcp && cd /opt/ida-mcp && nohup python3 -c \"from flask import Flask; app=Flask(__name__)\" --host 0.0.0.0 --port 5000 > /tmp/mcp.log 2>&1 & echo MCP started'"),
-        Triple("capstone", "4. Install Capstone",
-            "pkg install python capstone -y && pip3 install capstone"),
-        Triple("radare2", "5. Install Radare2", "pkg install radare2 -y"),
-        Triple("jadx", "6. Install JADX", "pkg install jadx -y"),
-        Triple("apktool", "7. Install APKTool", "pkg install apktool -y")
+    // 명령어 정의
+    private val commands = listOf(
+        Triple("setup_full", "1. 전체 IDA+MCP 자동설치",
+            listOf(
+                "pkg update -y",
+                "pkg upgrade -y",
+                "pkg install proot-distro -y",
+                "proot-distro install debian",
+                "pkg install radare2 jadx apktool -y",
+                "pip3 install capstone frida jnitrace"
+            )),
+        Triple("debian", "2. Debian 설치",
+            listOf("pkg update -y", "pkg install proot-distro -y", "proot-distro install debian")),
+        Triple("mcp_server", "3. IDA MCP 서버 시작",
+            listOf(
+                "pkill -f mcp_server.py 2>/dev/null; sleep 1",
+                "proot-distro login debian -- bash -c 'mkdir -p /opt/ida-mcp && cd /opt/ida-mcp && nohup python3 -c \"from flask import Flask; app=Flask(__name__); app.run(host=\\\"0.0.0.0\\\",port=5000)\" > /tmp/mcp.log 2>&1 & echo MCP started'"
+            )),
+        Triple("capstone", "4. Capstone 설치",
+            listOf("pkg install python capstone -y", "pip3 install capstone")),
+        Triple("radare2", "5. Radare2 설치",
+            listOf("pkg install radare2 -y")),
+        Triple("jadx", "6. JADX 설치",
+            listOf("pkg install jadx -y")),
+        Triple("apktool", "7. APKTool 설치",
+            listOf("pkg install apktool -y"))
     )
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -43,119 +54,71 @@ class TermuxSetupActivity : AppCompatActivity() {
         root.orientation = LinearLayout.VERTICAL
         root.setPadding(24, 24, 24, 24)
 
-        bridge = TermuxBridge(this)
-        idaMcpBridge = TermuxIdaMcpBridge(bridge)
+        // 헤더
+        val tvHeader = TextView(this)
+        tvHeader.text = "자동 설치 메뉴"
+        tvHeader.textSize = 22f
+        tvHeader.setTextColor(Color.WHITE)
+        tvHeader.setPadding(0, 0, 0, 8)
+        root.addView(tvHeader)
 
-        val tvInstall = TextView(this)
-        tvInstall.textSize = 18f
-        val installed = bridge.isInstalled()
-        tvInstall.text = "Termux: " + if (installed) "INSTALLED" else "NOT INSTALLED"
-        tvInstall.setTextColor(if (installed) Color.GREEN else Color.RED)
-        root.addView(tvInstall)
+        val tvDesc = TextView(this)
+        tvDesc.text = "버튼 누륵면 앱 내장 터미널에서 자동 실행됩니다\nTermux 설치 불필요!"
+        tvDesc.textSize = 14f
+        tvDesc.setTextColor(0xFFAAAAAA.toInt())
+        tvDesc.setPadding(0, 0, 0, 16)
+        root.addView(tvDesc)
 
-        if (!installed) {
-            val btn = Button(this)
-            btn.text = "Install Termux from F-Droid"
-            btn.setOnClickListener { bridge.openStore() }
-            root.addView(btn)
-        } else {
-            val hint = TextView(this)
-            hint.text = "Button -> Termux auto-opens -> command runs in background"
-            hint.setTextColor(0xFFAAAAAA.toInt())
-            root.addView(hint)
-
-            for ((cmdId, label, command) in buttons) {
-                val btn = Button(this)
-                btn.text = label
-                btn.setOnClickListener {
-                    bridge.runTracked(cmdId, command)
-                    Toast.makeText(this, "Launching Termux...", Toast.LENGTH_SHORT).show()
-                }
-                root.addView(btn)
-
-                val tv = TextView(this)
-                tv.textSize = 13f
-                tv.setPadding(16, 4, 16, 16)
-                root.addView(tv)
-                statusViews[cmdId] = tv
+        // 전체 실행 버튼 (빨간색)
+        val btnAll = Button(this)
+        btnAll.text = "0. 전체 순차 실행 (모두 설치)"
+        btnAll.setBackgroundColor(0xFFdc2626.toInt())
+        btnAll.setTextColor(Color.WHITE)
+        btnAll.setOnClickListener {
+            val allCommands = mutableListOf<String>()
+            for ((_, _, cmds) in commands) {
+                allCommands.addAll(cmds)
             }
+            openTerminal("전체 설치", allCommands)
+        }
+        root.addView(btnAll)
 
-            val sep = TextView(this)
-            sep.text = "\n--- Summary ---"
-            sep.setTextColor(0xFF555555.toInt())
-            root.addView(sep)
+        // 구분선
+        val sep1 = TextView(this)
+        sep1.text = ""
+        sep1.setPadding(0, 8, 0, 8)
+        root.addView(sep1)
 
-            val tvSummary = TextView(this)
-            tvSummary.textSize = 14f
-            root.addView(tvSummary)
-            statusViews["summary"] = tvSummary
+        // 개별 버튼
+        for ((cmdId, label, cmds) in commands) {
+            val btn = Button(this)
+            btn.text = label
+            btn.setOnClickListener {
+                openTerminal(label, cmds)
+            }
+            root.addView(btn)
 
-            val btnRefresh = Button(this)
-            btnRefresh.text = "Refresh"
-            btnRefresh.setOnClickListener { refreshAll() }
-            root.addView(btnRefresh)
-
-            tvLog = TextView(this)
-            tvLog.textSize = 11f
-            tvLog.setPadding(0, 8, 0, 0)
-            tvLog.setTextIsSelectable(true)
-            root.addView(tvLog)
-
-            startPolling()
+            // 설명
+            val tv = TextView(this)
+            tv.textSize = 11f
+            tv.setTextColor(0xFF888888.toInt())
+            tv.setPadding(16, 4, 16, 12)
+            tv.text = cmds.joinToString(" → ")
+            root.addView(tv)
         }
 
         scroll.addView(root)
         setContentView(scroll)
     }
 
-    private fun refreshAll() {
-        var running = 0
-        var done = 0
-        var failed = 0
-
-        for ((cmdId, label, _) in buttons) {
-            val (status, msg) = bridge.getStatus(cmdId)
-            val tv = statusViews[cmdId]
-            if (tv != null) {
-                val icon = bridge.iconFor(status)
-                val text = bridge.statusText(status)
-                tv.text = "  [" + icon + "] " + text + if (msg.isNotEmpty()) " (" + msg + ")" else ""
-                tv.setTextColor(bridge.statusColor(status))
-            }
-            when (status) {
-                TermuxBridge.Status.RUNNING, TermuxBridge.Status.READY -> running++
-                TermuxBridge.Status.COMPLETED -> done++
-                TermuxBridge.Status.FAILED -> failed++
-                else -> {}
-            }
-        }
-
-        val summary = statusViews["summary"]
-        if (summary != null) {
-            val sb = StringBuilder()
-            if (running > 0) sb.append("> Running: " + running + "  ")
-            if (done > 0) sb.append("OK Done: " + done + "  ")
-            if (failed > 0) sb.append("X Failed: " + failed + "  ")
-            if (sb.isEmpty()) sb.append("All idle")
-            summary.text = sb.toString()
-        }
-
-        val sb = StringBuilder("Logs:\n")
-        for ((cmdId, label, _) in buttons) {
-            val log = bridge.getLog(cmdId)
-            if (log.isNotEmpty()) sb.append("\n[" + label + "]\n" + log.take(500) + "\n")
-        }
-        tvLog.text = sb.toString()
-    }
-
-    private fun startPolling() {
-        handler.postDelayed(object : Runnable {
-            override fun run() { refreshAll(); handler.postDelayed(this, 2000) }
-        }, 500)
-    }
-
-    override fun onDestroy() {
-        super.onDestroy()
-        handler.removeCallbacksAndMessages(null)
+    /**
+     * TerminalActivity 열어서 명령 자동 실행
+     */
+    private fun openTerminal(title: String, cmds: List<String>) {
+        val intent = Intent(this, TerminalActivity::class.java)
+        intent.putStringArrayListExtra("commands", ArrayList(cmds))
+        intent.putExtra("title", title)
+        startActivity(intent)
+        Toast.makeText(this, "터미널에서 실행: $title", Toast.LENGTH_SHORT).show()
     }
 }
