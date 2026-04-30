@@ -1,17 +1,17 @@
 package com.hermes.reverser
 
-import android.net.Uri
+import android.graphics.Color
 import android.os.Bundle
 import android.widget.*
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
-import com.hermes.reverser.ai.AIMultiEngine
-import com.hermes.reverser.ai.AnalysisResult
-import com.hermes.reverser.model.BinaryInfo
+import com.hermes.reverser.analysis.MultiAnalyzer
 import kotlinx.coroutines.*
 
 /**
- * 바이너리 분석 Activity — 8개 AI 플랫폼 병렬 분석
+ * 병렬 멀티-엔진 분석 Activity
+ *
+ * IDA Pro Mobile + Capstone + Radare2 + Ghidra + JADX + APKTool + Unidbg + 8 AI
  */
 class AnalysisActivity : AppCompatActivity() {
 
@@ -19,9 +19,10 @@ class AnalysisActivity : AppCompatActivity() {
     private lateinit var tvProgress: TextView
     private lateinit var progressBar: ProgressBar
     private lateinit var layoutResults: LinearLayout
-    private lateinit var btnStart: Button
-
-    private val engine = AIMultiEngine()
+    private lateinit var btnQuick: Button
+    private lateinit var btnFull: Button
+    private lateinit var btnInstallTools: Button
+    private lateinit var analyzer: MultiAnalyzer
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -38,18 +39,28 @@ class AnalysisActivity : AppCompatActivity() {
         }
 
         tvProgress = TextView(this).apply {
-            text = "Ready to analyze"
+            text = "Ready"
             setPadding(0, 8, 0, 8)
         }
 
         progressBar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
-            max = 8
+            max = 15
             setPadding(0, 8, 0, 16)
         }
 
-        btnStart = Button(this).apply {
-            text = "Start Analysis"
-            setOnClickListener { startAnalysis() }
+        btnQuick = Button(this).apply {
+            text = "Quick Analysis (Local + AI)"
+            setOnClickListener { startQuickAnalysis() }
+        }
+
+        btnFull = Button(this).apply {
+            text = "Full Analysis (All Engines)"
+            setOnClickListener { startFullAnalysis() }
+        }
+
+        btnInstallTools = Button(this).apply {
+            text = "Install Termux Tools"
+            setOnClickListener { installTermuxTools() }
         }
 
         layoutResults = LinearLayout(this).apply {
@@ -59,43 +70,112 @@ class AnalysisActivity : AppCompatActivity() {
         layout.addView(tvFileName)
         layout.addView(tvProgress)
         layout.addView(progressBar)
-        layout.addView(btnStart)
+        layout.addView(btnQuick)
+        layout.addView(btnFull)
+        layout.addView(btnInstallTools)
         layout.addView(layoutResults)
 
         scrollView.addView(layout)
         setContentView(scrollView)
+
+        analyzer = MultiAnalyzer(this)
 
         val fileName = intent.getStringExtra("fileName") ?: "Unknown"
         val fileSize = intent.getLongExtra("fileSize", 0)
         tvFileName.text = "File: $fileName\nSize: ${formatSize(fileSize)}"
     }
 
-    private fun startAnalysis() {
-        btnStart.isEnabled = false
-        tvProgress.text = "Analyzing with 8 AI platforms..."
+    private fun startQuickAnalysis() {
+        btnQuick.isEnabled = false
         layoutResults.removeAllViews()
+        tvProgress.text = "Running quick analysis (Local + 8 AI)..."
 
         lifecycleScope.launch {
-            val fileName = intent.getStringExtra("fileName") ?: "unknown"
-            val binaryInfo = BinaryInfo(
-                fileName = fileName,
-                fileSize = intent.getLongExtra("fileSize", 0)
-            )
+            try {
+                val fileName = intent.getStringExtra("fileName") ?: "unknown"
+                val fileUri = intent.getStringExtra("fileUri") ?: ""
 
-            val results = engine.analyzeBinaryParallel(binaryInfo, "Analyze this binary file")
+                val bytes = readFileBytes(fileUri)
+                if (bytes == null) {
+                    tvProgress.text = "Error: Cannot read file"
+                    btnQuick.isEnabled = true
+                    return@launch
+                }
 
-            progressBar.progress = results.count { it.value.success }
-            tvProgress.text = "Complete: ${results.count { it.value.success }}/8 platforms"
+                val results = analyzer.analyzeQuick(fileName, bytes)
 
-            for ((platform, result) in results) {
-                addResultCard(platform.name, result)
+                val successCount = results.count { it.value.success }
+                tvProgress.text = "Complete: $successCount/${results.size} analyzers"
+                progressBar.progress = successCount
+
+                for ((type, result) in results) {
+                    addResultCard(type.displayName, result)
+                }
+            } catch (e: Exception) {
+                tvProgress.text = "Error: ${e.message}"
             }
-
-            btnStart.isEnabled = true
+            btnQuick.isEnabled = true
         }
     }
 
-    private fun addResultCard(platformName: String, result: AnalysisResult) {
+    private fun startFullAnalysis() {
+        btnFull.isEnabled = false
+        layoutResults.removeAllViews()
+        tvProgress.text = "Running full analysis (all engines)..."
+
+        lifecycleScope.launch {
+            try {
+                val fileName = intent.getStringExtra("fileName") ?: "unknown"
+                val fileUri = intent.getStringExtra("fileUri") ?: ""
+
+                val bytes = readFileBytes(fileUri)
+                if (bytes == null) {
+                    tvProgress.text = "Error: Cannot read file"
+                    btnFull.isEnabled = true
+                    return@launch
+                }
+
+                val results = analyzer.analyzeFull(fileName, bytes)
+
+                val successCount = results.count { it.value.success }
+                tvProgress.text = "Complete: $successCount/${results.size} analyzers"
+                progressBar.progress = successCount
+
+                for ((type, result) in results) {
+                    addResultCard(type.displayName, result)
+                }
+            } catch (e: Exception) {
+                tvProgress.text = "Error: ${e.message}"
+            }
+            btnFull.isEnabled = true
+        }
+    }
+
+    private fun installTermuxTools() {
+        btnInstallTools.isEnabled = false
+        tvProgress.text = "Installing tools in Termux..."
+
+        lifecycleScope.launch {
+            val tools = listOf(
+                MultiAnalyzer.AnalyzerType.RADARE2,
+                MultiAnalyzer.AnalyzerType.JADX,
+                MultiAnalyzer.AnalyzerType.APKTOOL
+            )
+
+            for (tool in tools) {
+                val cmd = analyzer.getInstallCommand(tool)
+                if (cmd.isNotEmpty()) {
+                    tvProgress.text = "Installing ${tool.displayName}..."
+                    // Termux 설치는 TermuxSetupActivity에서 처리
+                }
+            }
+
+            tvProgress.text = "Install commands ready. Use Termux Setup."
+            btnInstallTools.isEnabled = true
+        }
+    }
+
+    private fun addResultCard(title: String, result: MultiAnalyzer.AnalyzerResult) {
         val card = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(16, 16, 16, 16)
@@ -108,33 +188,33 @@ class AnalysisActivity : AppCompatActivity() {
             setBackgroundColor(if (result.success) 0xFF2D4A3E.toInt() else 0xFF4A3A3A.toInt())
         }
 
-        val tvPlatform = TextView(this).apply {
-            text = platformName + (if (result.success) " " else " (Failed)")
+        val tvTitle = TextView(this).apply {
+            text = title + (if (result.success) " " else " (Failed)")
             textSize = 16f
             setTextColor(0xFFFFFFFF.toInt())
         }
-        card.addView(tvPlatform)
+        card.addView(tvTitle)
 
         if (result.success) {
             val tvLatency = TextView(this).apply {
-                text = "Latency: ${result.latencyMs}ms | Score: %.2f".format(result.score)
+                text = "Latency: ${result.latencyMs}ms"
                 textSize = 12f
                 setTextColor(0xFFAAAAAA.toInt())
             }
             card.addView(tvLatency)
 
-            if (result.usageDescription.isNotEmpty()) {
-                val tvDesc = TextView(this).apply {
-                    text = result.usageDescription
-                    textSize = 13f
+            if (result.output.isNotEmpty()) {
+                val tvOutput = TextView(this).apply {
+                    text = if (result.output.length > 500) result.output.substring(0, 500) + "..." else result.output
+                    textSize = 12f
                     setTextColor(0xFFDDDDDD.toInt())
                     setPadding(0, 8, 0, 0)
                 }
-                card.addView(tvDesc)
+                card.addView(tvOutput)
             }
         } else {
             val tvError = TextView(this).apply {
-                text = "Error: " + result.errorMessage
+                text = "Error: " + result.error
                 textSize = 12f
                 setTextColor(0xFFFF8888.toInt())
             }
@@ -142,6 +222,15 @@ class AnalysisActivity : AppCompatActivity() {
         }
 
         layoutResults.addView(card)
+    }
+
+    private fun readFileBytes(uriString: String): ByteArray? {
+        return try {
+            val uri = android.net.Uri.parse(uriString)
+            contentResolver.openInputStream(uri)?.use { it.readBytes() }
+        } catch (e: Exception) {
+            null
+        }
     }
 
     private fun formatSize(bytes: Long): String {
