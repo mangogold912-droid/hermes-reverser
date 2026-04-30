@@ -98,7 +98,6 @@ class IdaProMobileEngine {
     private fun detectElfFunctions(bytes: ByteArray, baseAddr: Long): List<FunctionInfo> {
         val functions = mutableListOf<FunctionInfo>()
 
-        // .symtab 또는 .dynsym 파싱
         try {
             val is64bit = bytes[4] == 2.toByte()
             val eShoff = if (is64bit) {
@@ -108,7 +107,6 @@ class IdaProMobileEngine {
             }
             val eShentsize = if (is64bit) readInt16(bytes, 58) else readInt16(bytes, 46)
             val eShnum = if (is64bit) readInt16(bytes, 60) else readInt16(bytes, 48)
-            val eShstrndx = if (is64bit) readInt16(bytes, 62) else readInt16(bytes, 50)
 
             // 섹션 헤더 순회하여 .symtab/.dynsym 찾기
             for (i in 0 until eShnum) {
@@ -131,7 +129,7 @@ class IdaProMobileEngine {
                                 val stSize = if (is64bit) readLong64(bytes, symOffset + 16) else readInt32(bytes, symOffset + 8).toLong()
 
                                 functions.add(FunctionInfo(
-                                    name = "sub_${stValue.toString(16).padStart(8, '0')}",
+                                    name = "sub_" + stValue.toString(16).padStart(8, '0'),
                                     startAddress = baseAddr + stValue,
                                     endAddress = baseAddr + stValue + stSize,
                                     size = stSize
@@ -142,7 +140,7 @@ class IdaProMobileEngine {
                 }
             }
         } catch (e: Exception) {
-            Log.w(TAG, "ELF parsing error: ${e.message}")
+            Log.w(TAG, "ELF parsing error: " + e.message)
         }
 
         return functions
@@ -155,18 +153,16 @@ class IdaProMobileEngine {
         val functions = mutableListOf<FunctionInfo>()
         try {
             val peOffset = readInt32(bytes, 60)
-            val optionalHeaderSize = readInt16(bytes, peOffset + 20)
             val exportTableRVA = readInt32(bytes, peOffset + 24 + 112)
             val exportTableSize = readInt32(bytes, peOffset + 24 + 116)
 
             if (exportTableRVA > 0 && exportTableSize > 0) {
-                // Export Directory parsing
                 val numFunctions = readInt32(bytes, peOffset + exportTableRVA + 20)
                 for (i in 0 until minOf(numFunctions, 500)) {
                     val funcRVA = readInt32(bytes, peOffset + exportTableRVA + 28 + i * 4)
                     if (funcRVA > 0) {
                         functions.add(FunctionInfo(
-                            name = "export_$i",
+                            name = "export_" + i,
                             startAddress = baseAddr + funcRVA,
                             endAddress = baseAddr + funcRVA + 0x100,
                             size = 0x100
@@ -175,7 +171,7 @@ class IdaProMobileEngine {
                 }
             }
         } catch (e: Exception) {
-            Log.w(TAG, "PE parsing error: ${e.message}")
+            Log.w(TAG, "PE parsing error: " + e.message)
         }
         return functions
     }
@@ -189,14 +185,10 @@ class IdaProMobileEngine {
 
         // ARM 함수 프로로그 패턴
         val patterns = listOf(
-            // push {lr} ( Thumb: 0x00B5 )
-            byteArrayOf(0x00, 0xB5),
-            // push {r4, lr} ( Thumb: 0x10B5 )
-            byteArrayOf(0x10, 0xB5),
-            // stmfd sp!, {lr} ( ARM: 0xE92D4000 )
-            byteArrayOf(0x00, 0x40.toByte(), 0x2D, 0xE9.toByte()),
-            // stmfd sp!, {r4-r11, lr} ( ARM: 0xE92D4FF0 )
-            byteArrayOf(0xF0.toByte(), 0x4F, 0x2D, 0xE9.toByte())
+            byteArrayOf(0x00.toByte(), 0xB5.toByte()),
+            byteArrayOf(0x10.toByte(), 0xB5.toByte()),
+            byteArrayOf(0x00.toByte(), 0x40.toByte(), 0x2D.toByte(), 0xE9.toByte()),
+            byteArrayOf(0xF0.toByte(), 0x4F.toByte(), 0x2D.toByte(), 0xE9.toByte())
         )
 
         for (i in 0 until bytes.size - 4) {
@@ -214,7 +206,7 @@ class IdaProMobileEngine {
                         if (addr !in seen) {
                             seen.add(addr)
                             functions.add(FunctionInfo(
-                                name = "sub_${addr.toString(16).padStart(8, '0')}",
+                                name = "sub_" + addr.toString(16).padStart(8, '0'),
                                 startAddress = addr,
                                 endAddress = addr + 0x100,
                                 size = 0x100
@@ -239,20 +231,17 @@ class IdaProMobileEngine {
         while (i < end) {
             sb.append(String.format("%08X:  ", i))
 
-            // Hex bytes
             val lineEnd = minOf(i + 16, end)
             for (j in i until lineEnd) {
                 sb.append(String.format("%02X ", bytes[j.toInt()]))
             }
 
-            // Padding
             for (j in 0 until (16 - (lineEnd - i)).toInt()) {
                 sb.append("   ")
             }
 
             sb.append(" ")
 
-            // ASCII
             for (j in i until lineEnd) {
                 val b = bytes[j.toInt()].toInt() and 0xFF
                 if (b in 32..126) {
@@ -299,8 +288,6 @@ class IdaProMobileEngine {
         return xrefs
     }
 
-    // 헬퍼 함수들
-
     private fun readInt16(bytes: ByteArray, offset: Int): Int {
         return (bytes[offset].toInt() and 0xFF) or
                 ((bytes[offset + 1].toInt() and 0xFF) shl 8)
@@ -323,21 +310,25 @@ class IdaProMobileEngine {
 
     private fun parseDisassemblyOutput(output: String, baseAddr: Long): List<DisasmLine> {
         val lines = mutableListOf<DisasmLine>()
-        val lineRegex = "0x([0-9A-Fa-f]+):\\s*([^\\s]+)\\s+(.*)".toRegex()
 
         for (line in output.split("\n")) {
-            val match = lineRegex.find(line)
-            if (match != null) {
-                val addr = match.groupValues[1].toLong(16)
-                val mnemonic = match.groupValues[2]
-                val operands = match.groupValues[3]
-                lines.add(DisasmLine(
-                    address = addr,
-                    bytes = "",
-                    mnemonic = mnemonic,
-                    operands = operands,
-                    comment = annotations[addr] ?: ""
-                ))
+            val trimmed = line.trim()
+            if (trimmed.startsWith("0x")) {
+                val parts = trimmed.split("  ", " ", limit = 3)
+                if (parts.size >= 3) {
+                    try {
+                        val addr = parts[0].replace("0x", "").replace(":", "").toLong(16)
+                        val mnemonic = parts[1]
+                        val operands = parts[2]
+                        lines.add(DisasmLine(
+                            address = addr,
+                            bytes = "",
+                            mnemonic = mnemonic,
+                            operands = operands,
+                            comment = annotations[addr] ?: ""
+                        ))
+                    } catch (_: Exception) {}
+                }
             }
         }
 
