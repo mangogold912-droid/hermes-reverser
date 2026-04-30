@@ -1,0 +1,12 @@
+# Project-level ignore
+.gradle/
+build/
+*.iml
+.idea/
+local.properties
+captures/
+.externalNativeBuild/
+.cxx/
+*.apk
+*.ap_
+*.aab
