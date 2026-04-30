@@ -26,6 +26,7 @@ class TermuxBridge(private val context: Context) {
         private const val TAG = "TermuxBridge"
         private const val TERMUX_PACKAGE = "com.termux"
         private const val SHARED_DIR = "/sdcard/HermesReverser/"
+        private const val TERMUX_PREFIX = "/data/data/com.termux/files"
     }
 
     /**
@@ -83,6 +84,19 @@ class TermuxBridge(private val context: Context) {
         }, 600)
 
         return true
+    }
+
+    /**
+     * 스크립트를 파일로 저장 후 실행
+     */
+    fun runScript(script: String, scriptName: String): Boolean {
+        val sharedDir = File(SHARED_DIR)
+        sharedDir.mkdirs()
+        val scriptFile = File(sharedDir, scriptName)
+        scriptFile.writeText(script)
+        val cmdId = scriptName.replace(".sh", "").replace(".py", "")
+        val cmd = "bash $SHARED_DIR$scriptName >> $TERMUX_PREFIX/home/hermes.log 2>&1"
+        return runCommand(cmdId, cmd)
     }
 
     /**
@@ -154,10 +168,10 @@ class TermuxBridge(private val context: Context) {
             echo '{"status":"RUNNING","message":"Executing","time":"'$(date +%s)'"}' > $statusFile && 
             ($command) > $logFile 2>&1; 
             EXIT_CODE=$?; 
-            if [ $$EXIT_CODE -eq 0 ]; then 
+            if [ $EXIT_CODE -eq 0 ]; then 
                 echo '{"status":"COMPLETED","message":"Done","time":"'$(date +%s)'"}' > $statusFile; 
             else 
-                echo '{"status":"FAILED","message":"Exit code '$$EXIT_CODE'","time":"'$(date +%s)'"}' > $statusFile; 
+                echo '{"status":"FAILED","message":"Exit code '$EXIT_CODE'","time":"'$(date +%s)'"}' > $statusFile; 
             fi
         """.trimIndent().replace("\n", " ")
     }
@@ -234,22 +248,4 @@ class TermuxBridge(private val context: Context) {
         return when (status) {
             CommandStatus.IDLE -> 0xFF888888.toInt()     // Gray
             CommandStatus.PENDING -> 0xFFFFAA00.toInt()   // Orange
-            CommandStatus.RUNNING -> 0xFF00AAFF.toInt()   // Blue
-            CommandStatus.COMPLETED -> 0xFF00CC00.toInt() // Green
-            CommandStatus.FAILED -> 0xFFFF3333.toInt()    // Red
-        }
-    }
-
-    /**
-     * 상태 텍스트 (한국어)
-     */
-    fun getStatusText(status: CommandStatus): String {
-        return when (status) {
-            CommandStatus.IDLE -> "대기중"
-            CommandStatus.PENDING -> "시작중"
-            CommandStatus.RUNNING -> "실행중"
-            CommandStatus.COMPLETED -> "완료"
-            CommandStatus.FAILED -> "실패"
-        }
-    }
-}
+            CommandStatus.RUNNING -> 0xFF00AA
