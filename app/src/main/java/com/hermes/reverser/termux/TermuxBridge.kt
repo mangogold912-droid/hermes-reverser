@@ -12,13 +12,10 @@ import java.io.File
 import org.json.JSONObject
 
 /**
- * Termux 연동 — 4단계 fallback으로 명령 전달
+ * Termux 연동 — 5단계 fallback
  *
- * 순서:
- * 1. startForegroundService() 시도
- * 2. Runtime.exec("am startservice") 시도
- * 3. Broadcast 발송 시도
- * 4. 모두 실패 → 수동 실행 안내 (status=FAILED + 메시지)
+ * Termux:API 설치 필요
+ * 순서: startForegroundService → am startservice → broadcast → Termux:API notification → 수동
  */
 class TermuxBridge(private val context: Context) {
 
@@ -30,8 +27,14 @@ class TermuxBridge(private val context: Context) {
 
     enum class Status { IDLE, PENDING, RUNNING, COMPLETED, FAILED }
 
+    /** Termux 설치 여부 */
     fun isInstalled(): Boolean =
         try { context.packageManager.getPackageInfo(PKG, 0); true }
+        catch (_: Exception) { false }
+
+    /** Termux:API 설치 여부 */
+    fun isApiInstalled(): Boolean =
+        try { context.packageManager.getPackageInfo("$PKG.api", 0); true }
         catch (_: Exception) { false }
 
     fun openStore() {
@@ -40,8 +43,13 @@ class TermuxBridge(private val context: Context) {
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
     }
 
-    // ===== 기존 호환용 =====
+    fun openApiStore() {
+        context.startActivity(Intent(Intent.ACTION_VIEW,
+            Uri.parse("https://f-droid.org/packages/$PKG.api/"))
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+    }
 
+    // ===== 호환용 =====
     fun runCommand(command: String): Boolean =
         runTracked("cmd_" + System.currentTimeMillis(), command)
 
@@ -57,7 +65,7 @@ class TermuxBridge(private val context: Context) {
     fun installCapstone(): Boolean =
         runTracked("capstone", "pkg install python capstone -y && pip3 install capstone")
 
-    // ===== 상태 추적 실행 (4단계 fallback) =====
+    // ===== 상태 추적 실행 (5단계) =====
 
     fun runTracked(cmdId: String, command: String): Boolean {
         if (!isInstalled()) {
@@ -65,40 +73,27 @@ class TermuxBridge(private val context: Context) {
             return false
         }
 
-        // 0. 명령어를 .sh 파일로 저장 (수동 실행 fallback용)
         writeScriptFile(cmdId, command)
         saveStatus(cmdId, Status.PENDING, "Opening Termux...")
-
-        // 1. Termux를 포그라운드로 띄움
         openTermuxFront()
 
-        // 2. 1초 후 4단계 fallback 시도
         Handler(Looper.getMainLooper()).postDelayed({
             tryAllMethods(cmdId, command)
-        }, 1000)
+        }, 1200)
 
         return true
     }
 
-    /**
-     * 4단계 fallback
-     */
     private fun tryAllMethods(cmdId: String, command: String) {
-        Log.i(TAG, "[$cmdId] Trying all methods...")
+        Log.i(TAG, "[$cmdId] Trying 5 methods...")
 
-        // 단계 1: startForegroundService
         if (tryForegroundService(cmdId, command)) return
-
-        // 단계 2: am startservice via Runtime.exec
         if (tryAmCommand(cmdId, command)) return
-
-        // 단계 3: broadcast
         if (tryBroadcast(cmdId, command)) return
+        if (tryTermuxApiNotification(cmdId, command)) return
 
-        // 단계 4: 모두 실패 → 수동 실행 안내
-        Log.e(TAG, "[$cmdId] All methods failed")
         saveStatus(cmdId, Status.FAILED,
-            "Auto-failed. Open Termux and run:\n" +
+            "Auto methods failed. Open Termux, paste:\n" +
             "bash /sdcard/HermesReverser/$cmdId.sh")
     }
 
@@ -114,65 +109,68 @@ class TermuxBridge(private val context: Context) {
                 putExtra("$PKG.RUN_COMMAND_BACKGROUND", true)
             }
             ContextCompat.startForegroundService(context, intent)
-            saveStatus(cmdId, Status.RUNNING, "Method1: foregroundService OK")
-            Log.i(TAG, "[$cmdId] Method1 success")
+            saveStatus(cmdId, Status.RUNNING, "Method1: foregroundService")
             true
-        } catch (e: Exception) {
-            Log.w(TAG, "[$cmdId] Method1 failed: ${e.message}")
-            false
-        }
+        } catch (_: Exception) { false }
     }
 
     // 단계 2: am startservice via Runtime.exec
     private fun tryAmCommand(cmdId: String, command: String): Boolean {
-        val wrapped = wrapWithStatus(cmdId, command)
-        val esc = wrapped.replace("'", "'\\''").replace("\"", "\\\"")
-        val amCmd = arrayOf(
-            "sh", "-c",
-            "am startservice -n $PKG/$PKG.app.RunCommandService " +
-            "--es $PKG.RUN_COMMAND_PATH '/data/data/$PKG/files/usr/bin/bash' " +
-            "--esa $PKG.RUN_COMMAND_ARGUMENTS '-c,$esc' " +
-            "--ez $PKG.RUN_COMMAND_BACKGROUND true 2>&1"
-        )
-
+        val esc = wrapWithStatus(cmdId, command).replace("'", "'\\''").replace("\"", "\\\"")
         return try {
-            val proc = Runtime.getRuntime().exec(amCmd)
-            val exitCode = proc.waitFor()
-            val output = proc.inputStream.bufferedReader().readText()
+            val proc = Runtime.getRuntime().exec(arrayOf("sh", "-c",
+                "am startservice -n $PKG/$PKG.app.RunCommandService " +
+                "--es $PKG.RUN_COMMAND_PATH '/data/data/$PKG/files/usr/bin/bash' " +
+                "--esa $PKG.RUN_COMMAND_ARGUMENTS '-c,$esc' " +
+                "--ez $PKG.RUN_COMMAND_BACKGROUND true 2>&1"))
+            proc.waitFor()
             val err = proc.errorStream.bufferedReader().readText()
-
-            Log.d(TAG, "[$cmdId] Method2 exit=$exitCode out=$output err=$err")
-
-            if (exitCode == 0 && !err.contains("Error") && !err.contains("SecurityException")) {
+            val out = proc.inputStream.bufferedReader().readText()
+            if (proc.exitValue() == 0 && !err.contains("Error") && !out.contains("SecurityException")) {
                 saveStatus(cmdId, Status.RUNNING, "Method2: am OK")
-                Log.i(TAG, "[$cmdId] Method2 success")
                 true
-            } else {
-                Log.w(TAG, "[$cmdId] Method2 failed: exit=$exitCode err=$err")
-                false
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "[$cmdId] Method2 exception: ${e.message}")
-            false
-        }
+            } else false
+        } catch (_: Exception) { false }
     }
 
     // 단계 3: broadcast
     private fun tryBroadcast(cmdId: String, command: String): Boolean {
         return try {
-            val intent = Intent("$PKG.RUN_COMMAND").apply {
+            context.sendBroadcast(Intent("$PKG.RUN_COMMAND").apply {
                 setPackage(PKG)
                 putExtra("$PKG.RUN_COMMAND_PATH", "/data/data/$PKG/files/usr/bin/bash")
                 putExtra("$PKG.RUN_COMMAND_ARGUMENTS", arrayOf("-c", wrapWithStatus(cmdId, command)))
-            }
-            context.sendBroadcast(intent)
-            saveStatus(cmdId, Status.RUNNING, "Method3: broadcast OK")
-            Log.i(TAG, "[$cmdId] Method3 success")
+            })
+            saveStatus(cmdId, Status.RUNNING, "Method3: broadcast")
             true
-        } catch (e: Exception) {
-            Log.w(TAG, "[$cmdId] Method3 failed: ${e.message}")
-            false
-        }
+        } catch (_: Exception) { false }
+    }
+
+    // 단계 4: Termux:API notification (★ NEW!)
+    private fun tryTermuxApiNotification(cmdId: String, command: String): Boolean {
+        if (!isApiInstalled()) return false
+
+        val shortCmd = command.take(60) + "..."
+        return try {
+            // Termux:API로 notification + toast 발송
+            context.sendBroadcast(Intent("$PKG.api.ACTION_API").apply {
+                setClassName("$PKG.api", "$PKG.api.TermuxApiReceiver")
+                putExtra("api_method", "toast")
+                putExtra("params", "-s Hermes:$cmdId executing...")
+            })
+
+            // RUN_COMMAND 인텐트를 Termux:API를 통해
+            val runIntent = Intent("$PKG.RUN_COMMAND").apply {
+                setPackage(PKG)
+                putExtra("$PKG.RUN_COMMAND_PATH", "/data/data/$PKG/files/usr/bin/bash")
+                putExtra("$PKG.RUN_COMMAND_ARGUMENTS", arrayOf("-c", wrapWithStatus(cmdId, command)))
+                putExtra("$PKG.RUN_COMMAND_BACKGROUND", true)
+            }
+            context.sendBroadcast(runIntent)
+
+            saveStatus(cmdId, Status.RUNNING, "Method4: Termux:API OK")
+            true
+        } catch (_: Exception) { false }
     }
 
     // ===== 헬퍼 =====
@@ -184,32 +182,17 @@ class TermuxBridge(private val context: Context) {
                 intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
                 context.startActivity(intent)
             }
-        } catch (e: Exception) {
-            Log.w(TAG, "Cannot open Termux: ${e.message}")
-        }
+        } catch (_: Exception) {}
     }
 
-    /**
-     * 명령어를 .sh 파일로 저장 (수동 실행 fallback)
-     */
     private fun writeScriptFile(cmdId: String, command: String) {
         try {
             File(SHARED).mkdirs()
-            val content = """#!/bin/bash
-echo "=== Hermes: $cmdId ==="
-date
-$command
-echo "Exit code: \$?"
-""".trimIndent()
-            File(SHARED, "$cmdId.sh").writeText(content)
-        } catch (e: Exception) {
-            Log.w(TAG, "Write file error: ${e.message}")
-        }
+            File(SHARED, "$cmdId.sh").writeText(
+                "#!/bin/bash\necho \"=== Hermes: $cmdId ===\"\ndate\n$command\necho \"Exit: \$?\"\n")
+        } catch (_: Exception) {}
     }
 
-    /**
-     * 상태 저장 래퍼
-     */
     private fun wrapWithStatus(cmdId: String, cmd: String): String {
         val sf = "$SHARED${cmdId}_status.json"
         val lf = "$SHARED${cmdId}.log"
@@ -269,9 +252,4 @@ echo "Exit code: \$?"
 
     fun statusIcon(s: Status): String = when (s) {
         Status.IDLE -> "\u25ef"
-        Status.PENDING -> "\u27f3"
-        Status.RUNNING -> "\u25b6"
-        Status.COMPLETED -> "\u2714"
-        Status.FAILED -> "\u2716"
-    }
-}
+        Status.PENDING -> "\
