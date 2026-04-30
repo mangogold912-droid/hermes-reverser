@@ -70,7 +70,8 @@ class TermuxSetupActivity : AppCompatActivity() {
             val btnDebian = Button(this).apply {
                 text = "2. Install Debian Only"
                 setOnClickListener {
-                    if (bridge.runCommand(TermuxBridge().getDebianInstallScript())) {
+                    val cmd = "pkg update -y && pkg upgrade -y && pkg install proot-distro -y && proot-distro install debian"
+                    if (bridge.runCommand(cmd)) {
                         log("Debian installation started...")
                     } else {
                         log("Failed to start Debian install")
@@ -134,4 +135,7 @@ class TermuxSetupActivity : AppCompatActivity() {
     private fun showConnectDialog() {
         AlertDialog.Builder(this)
             .setTitle("IDA MCP Server Running")
-            .setMessage("Now go to Settings and connect to:\nHost:
+            .setMessage("Go to Settings and connect to MCP Server")
+            .setPositiveButton("Open Settings") { _, _ ->
+                val intent = Intent(this, SettingsActivity::class.java)
+                star
