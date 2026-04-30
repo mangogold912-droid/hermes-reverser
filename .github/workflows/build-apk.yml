@@ -5,11 +5,13 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+  actions: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -46,33 +48,61 @@ jobs:
           retention-days: 90
 
       - name: Generate Release Tag
-        if: success() && github.event_name == 'push'
+        if: success()
         id: tag
-        run: echo "tag_name=v1.0.0-$(date +%Y%m%d-%H%M%S)" >> $GITHUB_OUTPUT
+        run: |
+          TAG="v1.0.0-$(date +%Y%m%d-%H%M%S)-r${GITHUB_RUN_ID}"
+          echo "tag_name=$TAG" >> $GITHUB_OUTPUT
+          echo "Generated tag: $TAG"
 
       - name: Create Release
-        if: success() && github.event_name == 'push'
+        if: success()
         uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tag_name: ${{ steps.tag.outputs.tag_name }}
-          name: "Hermes Reverser v1.0.0"
+          name: "Hermes Reverser v1.0.0 Build ${{ github.run_number }}"
           body: |
-            ## Hermes Reverser — Full Release
+            ## Hermes Reverser — Full Release (Build ${{ github.run_number }})
+
+            ### Built-in Analyzers (App Native)
+            - **IDA Pro Mobile** — ARM/x86 disassembly, function detection, hex viewer
+            - **Capstone Native** — JNI disassembly engine
+            - **Strings Extractor** — Native string extraction
+
+            ### Termux Integration (Existing Termux Required)
+            - **Radare2** — Full reverse engineering framework
+            - **Ghidra Headless** — NSA SRE auto-analysis
+            - **Ghidra FOX** — Automated analysis scripts
+            - **JADX** — DEX to Java decompiler
+            - **APKTool** — APK resource decoder
+            - **Unidbg** — Unicorn emulator
+
+            ### Advanced Analyzers
+            - **eDBG** — eBPF-based Android debugger (ShinoLeah)
+            - **BPFroid** — Android API/native tracer (yanivagman)
+            - **heresy** — React Native inspector (Pilfer)
+            - **IDAObjcTypes** — Objective-C types collection (PoomSmart)
+            - **Frida** — Dynamic instrumentation
+            - **JNI Trace** — JNI API tracer
+            - **YARA** — Pattern matcher
+
+            ### AI Parallel Analysis (8 Platforms)
+            - OpenAI GPT-4, Kimi, Qwen, Gemini, Claude, DeepSeek, Ollama, SuperNinja
 
             ### Features
-            - **8 AI Parallel Analysis**: OpenAI, Kimi, Qwen, Gemini, Claude, DeepSeek, Ollama, SuperNinja
-            - **IDA Pro MCP Client**: External PC integration via TCP/JSON-RPC
-            - **Termux Integration**: Auto-install Debian + IDA Linux on Android
-            - **C++ Native Engine**: JNI disassembler, header analyzer, string extractor
-            - **AI Chat**: OpenClaw-style multi-platform chat interface
-            - **Reinforcement Learning**: Auto-ranking and prompt optimization
-            - **MANAGE_EXTERNAL_STORAGE**: Full file system access on Android 11+
+            - **Termux IDA+MCP Auto-Setup** — Debian install + MCP server + tools
+            - **AI Chat** — OpenClaw-style multi-platform chat
+            - **Reinforcement Learning** — Auto platform ranking optimization
+            - **MANAGE_EXTERNAL_STORAGE** — Full file system access on Android 11+
 
             ### Installation
-            1. Download `HermesReverser.apk`
+            1. Download `HermesReverser.apk` below
             2. Enable "Install unknown apps" in Settings
             3. Grant "All files access" permission on first launch
             4. Enter API keys in Settings for AI platforms
+            5. Install Termux from F-Droid for advanced analysis tools
 
             ### Permissions
             - `MANAGE_EXTERNAL_STORAGE` — Access all files
@@ -83,4 +113,4 @@ jobs:
 
       - name: Show APK info
         if: success()
-        run: ls -lh release/*.apk
+        run: ls -lh release/*.apk && sha256sum release/*.apk
