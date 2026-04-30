@@ -251,7 +251,7 @@ class TermuxBridge(private val context: Context) {
         Status.FAILED -> "\u2716 \uc2e4\ud328"
     }
 
-    fun statusIcon(s: Status): String = when (s) {
+    fun iconFor(s: Status): String = when (s) {
         Status.IDLE -> "\u25ef"
         Status.PENDING -> "\u27f3"
         Status.RUNNING -> "\u25b6"
