@@ -34,29 +34,30 @@ class TermuxBridge(private val context: Context) {
 
     /** Termux:API 설치 여부 */
     fun isApiInstalled(): Boolean =
-        try { context.packageManager.getPackageInfo("$PKG.api", 0); true }
+        try { context.packageManager.getPackageInfo("com.termux.api", 0); true }
         catch (_: Exception) { false }
 
     fun openStore() {
         context.startActivity(Intent(Intent.ACTION_VIEW,
-            Uri.parse("https://f-droid.org/packages/$PKG/"))
+            Uri.parse("https://f-droid.org/packages/com.termux/"))
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
     }
 
     fun openApiStore() {
         context.startActivity(Intent(Intent.ACTION_VIEW,
-            Uri.parse("https://f-droid.org/packages/$PKG.api/"))
+            Uri.parse("https://f-droid.org/packages/com.termux.api/"))
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
     }
 
     // ===== 호환용 =====
+
     fun runCommand(command: String): Boolean =
         runTracked("cmd_" + System.currentTimeMillis(), command)
 
     fun runScript(script: String, name: String): Boolean {
         File(SHARED).mkdirs()
         File(SHARED, name).writeText(script)
-        return runCommand("bash $SHARED$name >> $SHARED$name.log 2>&1")
+        return runCommand("bash " + SHARED + name + " >> " + SHARED + name + ".log 2>&1")
     }
 
     fun installDebian(): Boolean =
@@ -85,7 +86,7 @@ class TermuxBridge(private val context: Context) {
     }
 
     private fun tryAllMethods(cmdId: String, command: String) {
-        Log.i(TAG, "[$cmdId] Trying 5 methods...")
+        Log.i(TAG, "[" + cmdId + "] Trying 5 methods...")
 
         if (tryForegroundService(cmdId, command)) return
         if (tryAmCommand(cmdId, command)) return
@@ -93,20 +94,21 @@ class TermuxBridge(private val context: Context) {
         if (tryTermuxApiNotification(cmdId, command)) return
 
         saveStatus(cmdId, Status.FAILED,
-            "Auto methods failed. Open Termux, paste:\n" +
-            "bash /sdcard/HermesReverser/$cmdId.sh")
+            "All auto methods failed.\n" +
+            "Open Termux and run:\n" +
+            "bash /sdcard/HermesReverser/" + cmdId + ".sh")
     }
 
     // 단계 1: startForegroundService
     private fun tryForegroundService(cmdId: String, command: String): Boolean {
         return try {
             val intent = Intent().apply {
-                setClassName(PKG, "$PKG.app.RunCommandService")
-                action = "$PKG.RUN_COMMAND"
-                putExtra("$PKG.RUN_COMMAND_PATH", "/data/data/$PKG/files/usr/bin/bash")
-                putExtra("$PKG.RUN_COMMAND_ARGUMENTS", arrayOf("-c", wrapWithStatus(cmdId, command)))
-                putExtra("$PKG.RUN_COMMAND_WORKDIR", "/data/data/$PKG/files/home")
-                putExtra("$PKG.RUN_COMMAND_BACKGROUND", true)
+                setClassName(PKG, PKG + ".app.RunCommandService")
+                action = PKG + ".RUN_COMMAND"
+                putExtra(PKG + ".RUN_COMMAND_PATH", "/data/data/" + PKG + "/files/usr/bin/bash")
+                putExtra(PKG + ".RUN_COMMAND_ARGUMENTS", arrayOf("-c", wrapWithStatus(cmdId, command)))
+                putExtra(PKG + ".RUN_COMMAND_WORKDIR", "/data/data/" + PKG + "/files/home")
+                putExtra(PKG + ".RUN_COMMAND_BACKGROUND", true)
             }
             ContextCompat.startForegroundService(context, intent)
             saveStatus(cmdId, Status.RUNNING, "Method1: foregroundService")
@@ -119,10 +121,10 @@ class TermuxBridge(private val context: Context) {
         val esc = wrapWithStatus(cmdId, command).replace("'", "'\\''").replace("\"", "\\\"")
         return try {
             val proc = Runtime.getRuntime().exec(arrayOf("sh", "-c",
-                "am startservice -n $PKG/$PKG.app.RunCommandService " +
-                "--es $PKG.RUN_COMMAND_PATH '/data/data/$PKG/files/usr/bin/bash' " +
-                "--esa $PKG.RUN_COMMAND_ARGUMENTS '-c,$esc' " +
-                "--ez $PKG.RUN_COMMAND_BACKGROUND true 2>&1"))
+                "am startservice -n " + PKG + "/" + PKG + ".app.RunCommandService " +
+                "--es " + PKG + ".RUN_COMMAND_PATH '/data/data/" + PKG + "/files/usr/bin/bash' " +
+                "--esa " + PKG + ".RUN_COMMAND_ARGUMENTS '-c," + esc + "' " +
+                "--ez " + PKG + ".RUN_COMMAND_BACKGROUND true 2>&1"))
             proc.waitFor()
             val err = proc.errorStream.bufferedReader().readText()
             val out = proc.inputStream.bufferedReader().readText()
@@ -136,38 +138,32 @@ class TermuxBridge(private val context: Context) {
     // 단계 3: broadcast
     private fun tryBroadcast(cmdId: String, command: String): Boolean {
         return try {
-            context.sendBroadcast(Intent("$PKG.RUN_COMMAND").apply {
+            context.sendBroadcast(Intent(PKG + ".RUN_COMMAND").apply {
                 setPackage(PKG)
-                putExtra("$PKG.RUN_COMMAND_PATH", "/data/data/$PKG/files/usr/bin/bash")
-                putExtra("$PKG.RUN_COMMAND_ARGUMENTS", arrayOf("-c", wrapWithStatus(cmdId, command)))
+                putExtra(PKG + ".RUN_COMMAND_PATH", "/data/data/" + PKG + "/files/usr/bin/bash")
+                putExtra(PKG + ".RUN_COMMAND_ARGUMENTS", arrayOf("-c", wrapWithStatus(cmdId, command)))
             })
             saveStatus(cmdId, Status.RUNNING, "Method3: broadcast")
             true
         } catch (_: Exception) { false }
     }
 
-    // 단계 4: Termux:API notification (★ NEW!)
+    // 단계 4: Termux:API notification
     private fun tryTermuxApiNotification(cmdId: String, command: String): Boolean {
         if (!isApiInstalled()) return false
-
-        val shortCmd = command.take(60) + "..."
         return try {
-            // Termux:API로 notification + toast 발송
-            context.sendBroadcast(Intent("$PKG.api.ACTION_API").apply {
-                setClassName("$PKG.api", "$PKG.api.TermuxApiReceiver")
+            context.sendBroadcast(Intent("com.termux.api.ACTION_API").apply {
+                setClassName("com.termux.api", "com.termux.api.TermuxApiReceiver")
                 putExtra("api_method", "toast")
-                putExtra("params", "-s Hermes:$cmdId executing...")
+                putExtra("params", "-s Hermes:" + cmdId + " executing...")
             })
-
-            // RUN_COMMAND 인텐트를 Termux:API를 통해
-            val runIntent = Intent("$PKG.RUN_COMMAND").apply {
+            val runIntent = Intent(PKG + ".RUN_COMMAND").apply {
                 setPackage(PKG)
-                putExtra("$PKG.RUN_COMMAND_PATH", "/data/data/$PKG/files/usr/bin/bash")
-                putExtra("$PKG.RUN_COMMAND_ARGUMENTS", arrayOf("-c", wrapWithStatus(cmdId, command)))
-                putExtra("$PKG.RUN_COMMAND_BACKGROUND", true)
+                putExtra(PKG + ".RUN_COMMAND_PATH", "/data/data/" + PKG + "/files/usr/bin/bash")
+                putExtra(PKG + ".RUN_COMMAND_ARGUMENTS", arrayOf("-c", wrapWithStatus(cmdId, command)))
+                putExtra(PKG + ".RUN_COMMAND_BACKGROUND", true)
             }
             context.sendBroadcast(runIntent)
-
             saveStatus(cmdId, Status.RUNNING, "Method4: Termux:API OK")
             true
         } catch (_: Exception) { false }
@@ -188,26 +184,31 @@ class TermuxBridge(private val context: Context) {
     private fun writeScriptFile(cmdId: String, command: String) {
         try {
             File(SHARED).mkdirs()
-            File(SHARED, "$cmdId.sh").writeText(
-                "#!/bin/bash\necho \"=== Hermes: $cmdId ===\"\ndate\n$command\necho \"Exit: \$?\"\n")
+            File(SHARED, cmdId + ".sh").writeText(
+                "#!/bin/bash\necho \"=== Hermes: " + cmdId + " ===\"\ndate\n" + command + "\necho \"Exit: \$?\"\n")
         } catch (_: Exception) {}
     }
 
     private fun wrapWithStatus(cmdId: String, cmd: String): String {
-        val sf = "$SHARED${cmdId}_status.json"
-        val lf = "$SHARED${cmdId}.log"
+        val sf = SHARED + cmdId + "_status.json"
+        val lf = SHARED + cmdId + ".log"
         val esc = cmd.replace("'", "'\\''")
-        return "echo '{\"s\":\"RUNNING\",\"m\":\"Exec\"}' > $sf && ($esc) > $lf 2>&1; EC=\$?; " +
-               "if [ \$EC -eq 0 ]; then echo '{\"s\":\"COMPLETED\",\"m\":\"Done\"}' > $sf; " +
-               "else echo '{\"s\":\"FAILED\",\"m\":\"Exit '\$EC'\"}' > $sf; fi"
+        val sb = StringBuilder()
+        sb.append("echo '{\"s\":\"RUNNING\",\"m\":\"Exec\"}' > ").append(sf).append(" && ")
+        sb.append("(").append(esc).append(") > ").append(lf).append(" 2>&1; EC=\$?; ")
+        sb.append("if [ \$EC -eq 0 ]; then ")
+        sb.append("echo '{\"s\":\"COMPLETED\",\"m\":\"Done\"}' > ").append(sf).append("; ")
+        sb.append("else ")
+        sb.append("echo '{\"s\":\"FAILED\",\"m\":\"Err '\$EC'\"}' > ").append(sf).append("; fi")
+        return sb.toString()
     }
 
     // ===== 상태 관리 =====
 
-    fun saveStatus(id: String, status: Status, msg: String = "") {
+    fun saveStatus(id: String, status: Status, msg: String) {
         try {
             File(SHARED).mkdirs()
-            File(SHARED, "${id}_status.json").writeText(
+            File(SHARED, id + "_status.json").writeText(
                 JSONObject().apply {
                     put("status", status.name)
                     put("message", msg)
@@ -219,7 +220,7 @@ class TermuxBridge(private val context: Context) {
 
     fun getStatus(id: String): Pair<Status, String> {
         return try {
-            val f = File(SHARED, "${id}_status.json")
+            val f = File(SHARED, id + "_status.json")
             if (!f.exists()) return Pair(Status.IDLE, "Not started")
             val j = JSONObject(f.readText())
             val s = try { Status.valueOf(j.getString("status")) } catch (_: Exception) { Status.IDLE }
@@ -229,7 +230,7 @@ class TermuxBridge(private val context: Context) {
 
     fun getLog(id: String): String {
         return try {
-            val f = File(SHARED, "$id.log")
+            val f = File(SHARED, id + ".log")
             if (f.exists() && f.length() > 0) f.readText() else ""
         } catch (_: Exception) { "" }
     }
@@ -244,12 +245,6 @@ class TermuxBridge(private val context: Context) {
 
     fun statusText(s: Status): String = when (s) {
         Status.IDLE -> "\u5927\uae30\uc911"
-        Status.PENDING -> "\uc2dc\uc791\uc911"
-        Status.RUNNING -> "\uc2e4\ud589\uc911"
-        Status.COMPLETED -> "\uc644\ub8cc"
-        Status.FAILED -> "\uc2e4\ud328"
-    }
-
-    fun statusIcon(s: Status): String = when (s) {
-        Status.IDLE -> "\u25ef"
-        Status.PENDING -> "\
+        Status.PENDING -> "\u27f3 \uc2dc\uc791\uc911"
+        Status.RUNNING -> "\u25b6 \uc2e4\ud589\uc911"
+        Status.COMPLETED -> "\u2714 \uc
