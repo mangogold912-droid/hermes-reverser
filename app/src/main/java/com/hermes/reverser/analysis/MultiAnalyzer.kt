@@ -217,7 +217,7 @@ class MultiAnalyzer(context: Context) {
                 append("echo '[DONE]' >> /sdcard/HermesReverser/results/${type.name.lowercase()}.txt\n")
             }
 
-            val success = termuxBridge.runCommand(script)
+            val success = termuxBridge.runCommand(type.name, script)
             AnalyzerResult(
                 type = type,
                 success = success,
@@ -338,7 +338,7 @@ class MultiAnalyzer(context: Context) {
                     else -> "false"
                 }
                 val script = "$cmd >/dev/null 2>&1 && echo 'INSTALLED' || echo 'NOT_INSTALLED'"
-                termuxBridge.runCommand(script)
+                termuxBridge.runCommand(analyzer.name, script)
                 // 비동기 결과는 파일로 확인
                 results[analyzer] = false // 기본값, 실제 확인은 별도
             }
