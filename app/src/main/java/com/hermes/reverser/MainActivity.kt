@@ -33,6 +33,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnTermux: Button
     private lateinit var btnExternalIda: Button
     private lateinit var btnTerminal: Button
+    private lateinit var btnAiChat: Button
 
     private var selectedFileUri: Uri? = null
     private var selectedFileName: String = ""
@@ -58,6 +59,7 @@ class MainActivity : AppCompatActivity() {
         btnTermux = findViewById(R.id.btnTermux)
         btnExternalIda = findViewById(R.id.btnExternalIda)
         btnTerminal = findViewById(R.id.btnTerminal)
+        btnAiChat = findViewById(R.id.btnAiChat)
 
         btnSelectFile.setOnClickListener { pickFile() }
         btnAllFiles.setOnClickListener { requestAllFilesAccess() }
@@ -67,6 +69,7 @@ class MainActivity : AppCompatActivity() {
         btnTermux.setOnClickListener { openTermuxSetup() }
         btnExternalIda.setOnClickListener { openExternalIda() }
         btnTerminal.setOnClickListener { openTerminal() }
+        btnAiChat.setOnClickListener { openAiChat() }
     }
 
     private fun checkPermissions() {
@@ -188,6 +191,10 @@ class MainActivity : AppCompatActivity() {
 
     private fun openTermuxSetup() {
         startActivity(Intent(this, TermuxSetupActivity::class.java))
+    }
+
+    private fun openAiChat() {
+        startActivity(Intent(this, AIChatActivity::class.java))
     }
 
     private fun openTerminal() {
