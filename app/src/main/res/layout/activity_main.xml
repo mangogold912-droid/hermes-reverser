@@ -95,6 +95,13 @@
     </LinearLayout>
 
     <Button
+        android:id="@+id/btnAiChat"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="AI Chat (Memory + Plugins)"
+        android:backgroundTint="#7c3aed" />
+
+    <Button
         android:id="@+id/btnTerminal"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
