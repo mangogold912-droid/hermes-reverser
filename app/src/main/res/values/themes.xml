@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.Reverser" parent="Theme.Material3.Dark.NoActionBar">
+        <item name="colorPrimary">#0ea5e9</item>
+        <item name="colorPrimaryVariant">#0284c7</item>
+        <item name="colorOnPrimary">#ffffff</item>
+        <item name="colorSecondary">#8b5cf6</item>
+        <item name="android:colorBackground">#0f172a</item>
+        <item name="colorSurface">#1e293b</item>
+        <item name="colorOnSurface">#e2e8f0</item>
+        <item name="android:statusBarColor">#0f172a</item>
+    </style>
+</resources>
