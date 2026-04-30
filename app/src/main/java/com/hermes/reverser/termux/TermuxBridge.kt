@@ -247,4 +247,15 @@ class TermuxBridge(private val context: Context) {
         Status.IDLE -> "\u5927\uae30\uc911"
         Status.PENDING -> "\u27f3 \uc2dc\uc791\uc911"
         Status.RUNNING -> "\u25b6 \uc2e4\ud589\uc911"
-        Status.COMPLETED -> "\u2714 \uc
+        Status.COMPLETED -> "\u2714 \uc644\ub8cc"
+        Status.FAILED -> "\u2716 \uc2e4\ud328"
+    }
+
+    fun statusIcon(s: Status): String = when (s) {
+        Status.IDLE -> "\u25ef"
+        Status.PENDING -> "\u27f3"
+        Status.RUNNING -> "\u25b6"
+        Status.COMPLETED -> "\u2714"
+        Status.FAILED -> "\u2716"
+    }
+}
