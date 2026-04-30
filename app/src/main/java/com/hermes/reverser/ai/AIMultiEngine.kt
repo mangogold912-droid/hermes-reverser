@@ -85,7 +85,7 @@ class AIMultiEngine(private val apiKeys: Map<AIPlatform, String> = emptyMap()) {
             val latency = System.currentTimeMillis() - startTime
             parseResponse(platform, response, latency)
         } catch (e: Exception) {
-            Log.e(TAG, "Error analyzing with ${platform.name}: ${e.message}")
+            Log.e(TAG, "Error analyzing with " + platform.name + ": " + e.message)
             AnalysisResult(
                 platform = platform,
                 success = false,
@@ -105,7 +105,7 @@ class AIMultiEngine(private val apiKeys: Map<AIPlatform, String> = emptyMap()) {
         binaryInfo: com.hermes.reverser.model.BinaryInfo
     ): String {
         val fullPrompt = buildAnalysisPrompt(prompt, binaryInfo)
-        val jsonBody = when (platform) {
+        val jsonBody: String = when (platform) {
             AIPlatform.OPENAI, AIPlatform.KIMI, AIPlatform.DEEPSEEK ->
                 buildOpenAiFormat(fullPrompt)
             AIPlatform.CLAUDE ->
@@ -153,11 +153,12 @@ class AIMultiEngine(private val apiKeys: Map<AIPlatform, String> = emptyMap()) {
         }
 
         val request = requestBuilder.build()
-        client.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) {
-                throw IOException("HTTP ${response.code}: ${response.body?.string()}")
+        val response = client.newCall(request).execute()
+        return response.use {
+            if (!it.isSuccessful) {
+                throw IOException("HTTP " + it.code + ": " + it.body?.string())
             }
-            response.body?.string() ?: ""
+            it.body?.string() ?: ""
         }
     }
 
@@ -168,16 +169,18 @@ class AIMultiEngine(private val apiKeys: Map<AIPlatform, String> = emptyMap()) {
         sb.append("2. Function-by-function analysis\n")
         sb.append("3. Security vulnerabilities (if any)\n")
         sb.append("4. What this code does and where it's used\n\n")
-        sb.append("File: ${binaryInfo.fileName}\n")
-        sb.append("Type: ${binaryInfo.fileType}\n")
-        sb.append("Size: ${binaryInfo.fileSize} bytes\n")
-        sb.append("Architecture: ${binaryInfo.architecture}\n")
-        sb.append("MD5: ${binaryInfo.md5Hash}\n\n")
+        sb.append("File: " + binaryInfo.fileName + "\n")
+        sb.append("Type: " + binaryInfo.fileType + "\n")
+        sb.append("Size: " + binaryInfo.fileSize + " bytes\n")
+        sb.append("Architecture: " + binaryInfo.architecture + "\n")
+        sb.append("MD5: " + binaryInfo.md5Hash + "\n\n")
         if (binaryInfo.strings.isNotEmpty()) {
             sb.append("Strings found:\n")
-            binaryInfo.strings.take(50).forEach { sb.append("  - $it\n") }
+            for (s in binaryInfo.strings.take(50)) {
+                sb.append("  - " + s + "\n")
+            }
         }
-        sb.append("\nUser request: $userPrompt\n")
+        sb.append("\nUser request: " + userPrompt + "\n")
         return sb.toString()
     }
 
@@ -257,7 +260,7 @@ class AIMultiEngine(private val apiKeys: Map<AIPlatform, String> = emptyMap()) {
     private fun parseResponse(platform: AIPlatform, responseBody: String, latencyMs: Long): AnalysisResult {
         return try {
             val json = JSONObject(responseBody)
-            val content = when (platform) {
+            val content: String = when (platform) {
                 AIPlatform.OPENAI, AIPlatform.KIMI, AIPlatform.DEEPSEEK -> {
                     val choices = json.getJSONArray("choices")
                     if (choices.length() > 0) {
@@ -265,8 +268,8 @@ class AIMultiEngine(private val apiKeys: Map<AIPlatform, String> = emptyMap()) {
                     } else ""
                 }
                 AIPlatform.CLAUDE -> {
-                    val content_arr = json.getJSONArray("content")
-                    if (content_arr.length() > 0) content_arr.getJSONObject(0).getString("text") else ""
+                    val contentArr = json.getJSONArray("content")
+                    if (contentArr.length() > 0) contentArr.getJSONObject(0).getString("text") else ""
                 }
                 AIPlatform.GEMINI -> {
                     val candidates = json.getJSONArray("candidates")
@@ -286,9 +289,6 @@ class AIMultiEngine(private val apiKeys: Map<AIPlatform, String> = emptyMap()) {
                 }
             }
 
-            // 콘텐츠에서 섹션 추출 (간단한 문자열 분석)
-            val sections = content.split("###", "##", "---", "===", "\n\n")
-
             AnalysisResult(
                 platform = platform,
                 decompiledCode = extractSection(content, "Decompile", "Pseudocode"),
@@ -301,12 +301,12 @@ class AIMultiEngine(private val apiKeys: Map<AIPlatform, String> = emptyMap()) {
                 score = if (content.isNotEmpty()) 0.7 else 0.0
             )
         } catch (e: Exception) {
-            Log.e(TAG, "Parse error for ${platform.name}: ${e.message}")
+            Log.e(TAG, "Parse error for " + platform.name + ": " + e.message)
             AnalysisResult(
                 platform = platform,
                 rawResponse = responseBody,
                 success = false,
-                errorMessage = "Parse error: ${e.message}",
+                errorMessage = "Parse error: " + e.message,
                 latencyMs = latencyMs
             )
         }
