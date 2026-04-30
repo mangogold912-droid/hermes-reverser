@@ -349,5 +349,5 @@ class ExtendedMultiAnalyzer(context: Context) {
     // 기본 MultiAnalyzer 위임
     suspend fun analyzeQuick(filePath: String, bytes: ByteArray) = baseAnalyzer.analyzeQuick(filePath, bytes)
     suspend fun analyzeFull(filePath: String, bytes: ByteArray) = baseAnalyzer.analyzeFull(filePath, bytes)
-    fun checkInstallations() = baseAnalyzer.checkInstallations()
+    suspend fun checkInstallations() = baseAnalyzer.checkInstallations()
 }
