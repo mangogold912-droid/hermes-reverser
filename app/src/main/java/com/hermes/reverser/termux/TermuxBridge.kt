@@ -11,179 +11,191 @@ import java.io.File
 import org.json.JSONObject
 
 /**
- * 이미 설치된 Termux와 연동
+ * 이미 설치된 Termux와 연동 — Run #52 기준 개선
+ *
+ * 작동 순서:
+ * 1. 명령어를 /sdcard/HermesReverser/cmd_XXX.sh에 저장
+ * 2. Termux를 포그라운드로 띄움 (startActivity)
+ * 3. 800ms 후 am startservice로 Termux에 명령 전달
+ * 4. /sdcard/HermesReverser/status_XXX.json에 상태 저장
+ * 5. UI에서 2초마다 파일 읽어 상태 업데이트
  */
 class TermuxBridge(private val context: Context) {
 
     companion object {
         private const val TAG = "TermuxBridge"
-        private const val TERMUX_PACKAGE = "com.termux"
-        private const val SHARED_DIR = "/sdcard/HermesReverser/"
+        private const val TERMUX_PKG = "com.termux"
+        private const val SHARED = "/sdcard/HermesReverser/"
     }
 
-    enum class CommandStatus { IDLE, PENDING, RUNNING, COMPLETED, FAILED }
+    enum class Status { IDLE, PENDING, RUNNING, COMPLETED, FAILED }
 
-    fun isTermuxInstalled(): Boolean {
-        return try {
-            context.packageManager.getPackageInfo(TERMUX_PACKAGE, 0)
-            true
-        } catch (e: Exception) { false }
+    fun isInstalled(): Boolean =
+        try { context.packageManager.getPackageInfo(TERMUX_PKG, 0); true }
+        catch (_: Exception) { false }
+
+    fun openStore() {
+        context.startActivity(Intent(Intent.ACTION_VIEW,
+            Uri.parse("https://f-droid.org/packages/com.termux/"))
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
     }
 
-    fun openTermuxStore() {
-        val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://f-droid.org/packages/com.termux/"))
-        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        context.startActivity(intent)
-    }
-
-    // === 기존 메서드 (호환성 유지) ===
-
+    /**
+     * 기존 호환용 — 상태 추적 없이 실행
+     */
     fun runCommand(command: String): Boolean {
-        return runCommandInternal("cmd_" + System.currentTimeMillis(), command)
+        return runTracked("cmd_" + System.currentTimeMillis(), command)
     }
 
-    fun runScript(script: String, scriptName: String): Boolean {
-        val dir = File(SHARED_DIR)
-        dir.mkdirs()
-        val f = File(dir, scriptName)
-        f.writeText(script)
-        val cmd = "bash $SHARED_DIR$scriptName >> $SHARED_DIR/hermes.log 2>&1"
-        return runCommand(cmd)
-    }
+    /**
+     * 상태 추적 + Termux 자동 실행
+     */
+    fun runTracked(cmdId: String, command: String): Boolean {
+        if (!isInstalled()) {
+            Toast.makeText(context, "Termux not installed", Toast.LENGTH_SHORT).show()
+            return false
+        }
 
-    // === 새 메서드: 상태 추적 ===
+        Log.i(TAG, "[$cmdId] Starting...")
+        saveStatus(cmdId, Status.PENDING, "Opening Termux...")
 
-    fun runCommandTracked(commandId: String, command: String): Boolean {
-        return runCommandInternal(commandId, command)
-    }
+        // 1. 명령어를 파일로 저장 (Termux가 읽을 수 있게)
+        writeCommandFile(cmdId, command)
 
-    private fun runCommandInternal(commandId: String, command: String): Boolean {
-        Log.i(TAG, "[$commandId] Command: ${command.take(60)}")
-        if (!isTermuxInstalled()) { Toast.makeText(context, "Termux not installed", Toast.LENGTH_SHORT).show(); return false }
+        // 2. Termux 포그라운드로 띄움
+        bringTermuxFront()
 
-        saveStatus(commandId, CommandStatus.PENDING, "Starting...")
-        bringTermuxToFront()
-
+        // 3. 800ms 후 am startservice로 명령 실행
         Handler(Looper.getMainLooper()).postDelayed({
-            sendCommandIntent(commandId, command)
-        }, 600)
+            sendViaAm(cmdId, command)
+        }, 800)
+
         return true
     }
 
-    private fun bringTermuxToFront() {
+    /**
+     * Termux를 화면 맨 앞으로
+     */
+    private fun bringTermuxFront() {
         try {
-            val intent = context.packageManager.getLaunchIntentForPackage(TERMUX_PACKAGE)
+            val intent = context.packageManager.getLaunchIntentForPackage(TERMUX_PKG)
             if (intent != null) {
                 intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
                 context.startActivity(intent)
             }
-        } catch (e: Exception) { Log.w(TAG, "Cannot bring Termux to front") }
-    }
-
-    private fun sendCommandIntent(commandId: String, command: String) {
-        val fullCmd = buildWrappedCommand(commandId, command)
-        val intent = Intent().apply {
-            setClassName(TERMUX_PACKAGE, "com.termux.app.RunCommandService")
-            action = "com.termux.RUN_COMMAND"
-            putExtra("com.termux.RUN_COMMAND_PATH", "/data/data/com.termux/files/usr/bin/bash")
-            putExtra("com.termux.RUN_COMMAND_ARGUMENTS", arrayOf("-c", fullCmd))
-            putExtra("com.termux.RUN_COMMAND_WORKDIR", "/data/data/com.termux/files/home")
-            putExtra("com.termux.RUN_COMMAND_BACKGROUND", true)
-        }
-        try {
-            context.startForegroundService(intent)
-            saveStatus(commandId, CommandStatus.RUNNING, "Executing in Termux")
         } catch (e: Exception) {
-            Log.w(TAG, "startForegroundService failed: " + e.message)
-            tryAmFallback(commandId, fullCmd)
+            Log.w(TAG, "Cannot open Termux: " + e.message)
         }
     }
 
-    private fun tryAmFallback(commandId: String, command: String) {
-        val esc = command.replace("'", "'\\''")
-        val amCmd = "am startservice -n com.termux/com.termux.app.RunCommandService --es com.termux.RUN_COMMAND_PATH '/data/data/com.termux/files/usr/bin/bash' --esa com.termux.RUN_COMMAND_ARGUMENTS '-c,$esc' --ez com.termux.RUN_COMMAND_BACKGROUND true"
+    /**
+     * am startservice로 명령 전달 (가장 안정적)
+     */
+    private fun sendViaAm(cmdId: String, command: String) {
+        val wrapped = wrapWithStatus(cmdId, command)
+        // bash -c '...' 형태로 am 명령어 실행
+        val amCmd = arrayOf(
+            "sh", "-c",
+            "am startservice -n $TERMUX_PKG/com.termux.app.RunCommandService " +
+            "--es com.termux.RUN_COMMAND_PATH /data/data/$TERMUX_PKG/files/usr/bin/bash " +
+            "--esa com.termux.RUN_COMMAND_ARGUMENTS '-c,$wrapped' " +
+            "--ez com.termux.RUN_COMMAND_BACKGROUND true"
+        )
         try {
-            Runtime.getRuntime().exec(amCmd)
-            saveStatus(commandId, CommandStatus.RUNNING, "Executing via am")
+            val proc = Runtime.getRuntime().exec(amCmd)
+            val exitCode = proc.waitFor()
+            if (exitCode == 0) {
+                Log.i(TAG, "[$cmdId] am startservice OK")
+            } else {
+                val err = proc.errorStream.bufferedReader().readText()
+                Log.w(TAG, "[$cmdId] am exit=$exitCode err=$err")
+            }
         } catch (e: Exception) {
-            saveStatus(commandId, CommandStatus.FAILED, "All methods failed")
+            Log.e(TAG, "[$cmdId] am failed: " + e.message)
         }
     }
 
-    private fun buildWrappedCommand(cmdId: String, cmd: String): String {
-        val sf = "$SHARED_DIR${cmdId}_status.json"
-        val lf = "$SHARED_DIR${cmdId}.log"
-        val escCmd = cmd.replace("'", "'\\''").replace("\"", "\\\"")
-        val sb = StringBuilder()
-        sb.append("echo '{\"status\":\"RUNNING\",\"msg\":\"Started\"}' > $sf ; ")
-        sb.append(" ($escCmd) > $lf 2>&1 ; ")
-        sb.append("EC=\$? ; ")
-        sb.append("if [ \$EC -eq 0 ]; then ")
-        sb.append("  echo '{\"status\":\"COMPLETED\",\"msg\":\"Done\"}' > $sf ; ")
-        sb.append("else ")
-        sb.append("  echo '{\"status\":\"FAILED\",\"msg\":\"Exit '\$EC'\"}' > $sf ; ")
-        sb.append("fi")
-        return sb.toString()
+    /**
+     * 명령어를 상태 저장 래퍼로 감쌈
+     */
+    private fun wrapWithStatus(cmdId: String, cmd: String): String {
+        val sf = SHARED + cmdId + "_status.json"
+        val lf = SHARED + cmdId + ".log"
+        val esc = cmd.replace("'", "'\\''")
+        return "echo '{\"s\":\"RUNNING\",\"m\":\"Exec\"}' > $sf && ($esc) > $lf 2>&1; EC=\$?; " +
+               "if [ \$EC -eq 0 ]; then echo '{\"s\":\"COMPLETED\",\"m\":\"Done\"}' > $sf; " +
+               "else echo '{\"s\":\"FAILED\",\"m\":\"Err '\$EC'\"}' > $sf; fi"
+    }
+
+    /**
+     * 명령어를 스크립트 파일로 저장
+     */
+    private fun writeCommandFile(cmdId: String, command: String) {
+        try {
+            File(SHARED).mkdirs()
+            File(SHARED, "$cmdId.sh").writeText("#!/bin/bash\n$command\n")
+        } catch (e: Exception) { Log.w(TAG, "Write file error") }
     }
 
     // === 상태 관리 ===
 
-    fun saveStatus(commandId: String, status: CommandStatus, message: String) {
+    fun saveStatus(id: String, status: Status, msg: String = "") {
         try {
-            File(SHARED_DIR).mkdirs()
-            val json = JSONObject().apply {
-                put("status", status.name)
-                put("message", message)
-                put("time", System.currentTimeMillis())
-            }
-            File(SHARED_DIR, "${commandId}_status.json").writeText(json.toString())
-        } catch (e: Exception) { Log.w(TAG, "saveStatus error") }
+            File(SHARED).mkdirs()
+            File(SHARED, "${id}_status.json").writeText(
+                JSONObject().apply {
+                    put("status", status.name)
+                    put("message", msg)
+                    put("time", System.currentTimeMillis())
+                }.toString()
+            )
+        } catch (_: Exception) {}
     }
 
-    fun getStatus(commandId: String): Pair<CommandStatus, String> {
+    fun getStatus(id: String): Pair<Status, String> {
         return try {
-            val f = File(SHARED_DIR, "${commandId}_status.json")
-            if (!f.exists()) return Pair(CommandStatus.IDLE, "Not started")
-            val json = JSONObject(f.readText())
-            val s = try { CommandStatus.valueOf(json.getString("status")) } catch (_: Exception) { CommandStatus.IDLE }
-            Pair(s, json.optString("message", ""))
-        } catch (e: Exception) { Pair(CommandStatus.IDLE, "Error") }
+            val f = File(SHARED, "${id}_status.json")
+            if (!f.exists()) return Pair(Status.IDLE, "Not started")
+            val j = JSONObject(f.readText())
+            val s = try { Status.valueOf(j.getString("status")) } catch (_: Exception) { Status.IDLE }
+            Pair(s, j.optString("message", ""))
+        } catch (_: Exception) { Pair(Status.IDLE, "Error") }
     }
 
-    fun getLog(commandId: String): String {
+    fun getLog(id: String): String {
         return try {
-            val f = File(SHARED_DIR, "$commandId.log")
+            val f = File(SHARED, "$id.log")
             if (f.exists() && f.length() > 0) f.readText() else ""
-        } catch (e: Exception) { "" }
+        } catch (_: Exception) { "" }
     }
 
-    fun getStatusColor(status: CommandStatus): Int {
-        return when (status) {
-            CommandStatus.IDLE -> 0xFF888888.toInt()
-            CommandStatus.PENDING -> 0xFFFFAA00.toInt()
-            CommandStatus.RUNNING -> 0xFF00AAFF.toInt()
-            CommandStatus.COMPLETED -> 0xFF00CC00.toInt()
-            CommandStatus.FAILED -> 0xFFFF3333.toInt()
-        }
+    fun statusColor(s: Status): Int = when (s) {
+        Status.IDLE -> 0xFF888888.toInt()
+        Status.PENDING -> 0xFFFFAA00.toInt()
+        Status.RUNNING -> 0xFF00AAFF.toInt()
+        Status.COMPLETED -> 0xFF00CC00.toInt()
+        Status.FAILED -> 0xFFFF3333.toInt()
     }
 
-    fun getStatusText(status: CommandStatus): String {
-        return when (status) {
-            CommandStatus.IDLE -> "\u5927\uae30\uc911"        // 대기중
-            CommandStatus.PENDING -> "\uc2dc\uc791\uc911"       // 시작중
-            CommandStatus.RUNNING -> "\uc2e4\ud589\uc911"       // 실행중
-            CommandStatus.COMPLETED -> "\uc644\ub8cc"           // 완료
-            CommandStatus.FAILED -> "\uc2e4\ud328"             // 실패
-        }
+    fun statusText(s: Status): String = when (s) {
+        Status.IDLE -> "\u5927\uae30\uc911"      // 대기중
+        Status.PENDING -> "\uc2dc\uc791\uc911"     // 시작중
+        Status.RUNNING -> "\uc2e4\ud589\uc911"     // 실행중
+        Status.COMPLETED -> "\uc644\ub8cc"         // 완료
+        Status.FAILED -> "\uc2e4\ud328"           // 실패
     }
 
-    fun installDebian(): Boolean {
-        val cmd = "pkg update -y && pkg upgrade -y && pkg install proot-distro -y && proot-distro install debian"
-        return runCommand(cmd)
+    // === 기존 호환 ===
+
+    fun runScript(script: String, name: String): Boolean {
+        File(SHARED).mkdirs()
+        File(SHARED, name).writeText(script)
+        return runCommand("bash $SHARED$name")
     }
 
-    fun installCapstone(): Boolean {
-        val cmd = "pkg install python capstone -y && pip3 install capstone"
-        return runCommand(cmd)
-    }
+    fun installDebian(): Boolean =
+        runCommand("pkg update -y && pkg install proot-distro -y && proot-distro install debian")
+
+    fun installCapstone(): Boolean =
+        runCommand("pkg install python capstone -y && pip3 install capstone")
 }
