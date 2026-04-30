@@ -95,6 +95,13 @@
     </LinearLayout>
 
     <Button
+        android:id="@+id/btnTerminal"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Built-in Terminal (No Termux!)"
+        android:backgroundTint="#dc2626" />
+
+    <Button
         android:id="@+id/btnSettings"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
