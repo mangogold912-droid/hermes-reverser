@@ -99,7 +99,7 @@ class ExtendedMultiAnalyzer(context: Context) {
         }
 
         // 2. 확장 분석기 (신규)
-        if (termuxBridge.isTermuxInstalled()) {
+        if (termuxBridge.isInstalled()) {
             val advancedJobs = ExtendedAnalyzerType.advanced().map { analyzer ->
                 async(Dispatchers.IO) {
                     val result = runAdvancedAnalyzer(analyzer, filePath, bytes)
@@ -153,7 +153,7 @@ class ExtendedMultiAnalyzer(context: Context) {
         script.append("echo 'eDBG: eBPF debugger ready' >> /sdcard/HermesReverser/results/edbg.txt && ")
         script.append("echo 'Usage: ./edbg -p <pid> or ./edbg -n <process_name>' >> /sdcard/HermesReverser/results/edbg.txt")
 
-        val success = termuxBridge.runCommand("edbg", script.toString())
+        val success = termuxBridge.runTracked("edbg", script.toString())
         return ExtendedResult(
             ExtendedAnalyzerType.EDBG,
             success,
@@ -174,7 +174,7 @@ class ExtendedMultiAnalyzer(context: Context) {
         script.append("echo 'BPFroid: Android API tracer ready' >> /sdcard/HermesReverser/results/bpfroid.txt && ")
         script.append("echo 'Usage: ./bpfroid --app <package_name>' >> /sdcard/HermesReverser/results/bpfroid.txt")
 
-        val success = termuxBridge.runCommand("bpfroid", script.toString())
+        val success = termuxBridge.runTracked("bpfroid", script.toString())
         return ExtendedResult(
             ExtendedAnalyzerType.BPFROID,
             success,
@@ -195,7 +195,7 @@ class ExtendedMultiAnalyzer(context: Context) {
         script.append("echo 'heresy: React Native inspector ready' >> /sdcard/HermesReverser/results/heresy.txt && ")
         script.append("echo 'Supports: Hermes bytecode, JSC, React Native bundles' >> /sdcard/HermesReverser/results/heresy.txt")
 
-        val success = termuxBridge.runCommand("heresy", script.toString())
+        val success = termuxBridge.runTracked("heresy", script.toString())
         return ExtendedResult(
             ExtendedAnalyzerType.HERESY,
             success,
@@ -216,7 +216,7 @@ class ExtendedMultiAnalyzer(context: Context) {
         script.append("echo 'IDAObjcTypes: Objective-C types loaded' >> /sdcard/HermesReverser/results/idaobjc.txt && ")
         script.append("echo 'Types: iOS frameworks, private APIs, dyld, xpc, objc' >> /sdcard/HermesReverser/results/idaobjc.txt")
 
-        val success = termuxBridge.runCommand("idaobjctypes", script.toString())
+        val success = termuxBridge.runTracked("idaobjctypes", script.toString())
         return ExtendedResult(
             ExtendedAnalyzerType.IDAOBJCTYPES,
             success,
@@ -238,7 +238,7 @@ class ExtendedMultiAnalyzer(context: Context) {
         script.append("echo 'Ghidra FOX: Analysis scripts ready' >> /sdcard/HermesReverser/results/ghidra_fox.txt && ")
         script.append("echo 'Scripts: FOX, CryptoAnalyzer, StringDecryptor' >> /sdcard/HermesReverser/results/ghidra_fox.txt")
 
-        val success = termuxBridge.runCommand("ghidra_fox", script.toString())
+        val success = termuxBridge.runTracked("ghidra_fox", script.toString())
         return ExtendedResult(
             ExtendedAnalyzerType.GHIDRA_FOX,
             success,
@@ -255,7 +255,7 @@ class ExtendedMultiAnalyzer(context: Context) {
         script.append("echo 'Frida: Dynamic instrumentation ready' >> /sdcard/HermesReverser/results/frida.txt && ")
         script.append("echo 'Usage: frida -U -n <process_name> -l <script.js>' >> /sdcard/HermesReverser/results/frida.txt")
 
-        val success = termuxBridge.runCommand("frida", script.toString())
+        val success = termuxBridge.runTracked("frida", script.toString())
         return ExtendedResult(
             ExtendedAnalyzerType.FRIDA,
             success,
@@ -272,7 +272,7 @@ class ExtendedMultiAnalyzer(context: Context) {
         script.append("echo 'JNI Trace: JNI API tracer ready' >> /sdcard/HermesReverser/results/jni_trace.txt && ")
         script.append("echo 'Usage: jnitrace -l lib<name>.so <package_name>' >> /sdcard/HermesReverser/results/jni_trace.txt")
 
-        val success = termuxBridge.runCommand("jni_trace", script.toString())
+        val success = termuxBridge.runTracked("jni_trace", script.toString())
         return ExtendedResult(
             ExtendedAnalyzerType.JNI_TRACE,
             success,
@@ -311,7 +311,7 @@ class ExtendedMultiAnalyzer(context: Context) {
         script.append("echo 'YARA: Pattern matcher ready' >> /sdcard/HermesReverser/results/yara.txt && ")
         script.append("echo 'Usage: yara <rules.yar> <file>' >> /sdcard/HermesReverser/results/yara.txt")
 
-        val success = termuxBridge.runCommand("yara", script.toString())
+        val success = termuxBridge.runTracked("yara", script.toString())
         return ExtendedResult(
             ExtendedAnalyzerType.YARA,
             success,
@@ -349,4 +349,4 @@ class ExtendedMultiAnalyzer(context: Context) {
     // 기본 MultiAnalyzer 위임
     suspend fun analyzeQuick(filePath: String, bytes: ByteArray) = baseAnalyzer.analyzeQuick(filePath, bytes)
     suspend fun analyzeFull(filePath: String, bytes: ByteArray) = baseAnalyzer.analyzeFull(filePath, bytes)
-    suspend fun checkInstallations() = baseAnalyzer.checkInstallati
+    suspend fun checkInstallations()() = baseAnalyzer.checkInstallati
