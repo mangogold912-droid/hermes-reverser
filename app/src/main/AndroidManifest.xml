@@ -45,6 +45,7 @@
         <activity android:name=".ChatActivity" />
         <activity android:name=".SettingsActivity" />
         <activity android:name=".TermuxSetupActivity" />
+        <activity android:name=".TerminalActivity" android:hardwareAccelerated="true" />
 
         <service android:name=".termux.TermuxService"
             android:exported="false"
