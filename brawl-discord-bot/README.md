@@ -55,7 +55,12 @@ API 키가 허용 IP를 요구하면 봇이 실행되는 서버의 외부 IP를 
 
 ## Discord 설정과 권한
 
-Discord Developer Portal에서 봇을 만들고 OAuth2 초대 링크에 `bot`, `applications.commands` scope를 넣습니다. 봇을 **메인 서버와 보조 서버 양쪽에 초대**해야 합니다. `Server Members Intent`를 Developer Portal에서 켜야 보조 서버 입장자를 확인할 수 있습니다.
+Discord Developer Portal에서 봇을 만들고, 아래 초대 링크로 봇을 **메인 서버와 보조 서버 양쪽에 각각 초대**하세요. 링크는 제공한 Application ID `1554729717188272128`을 사용합니다.
+
+- [메인 대회 서버에 추가](https://discord.com/oauth2/authorize?client_id=1554729717188272128&scope=bot%20applications.commands&permissions=84996)
+- [보조 승자 서버에 추가](https://discord.com/oauth2/authorize?client_id=1554729717188272128&scope=bot&permissions=1027)
+
+Developer Portal에서 `Server Members Intent`를 켜야 보조 서버 입장자를 확인할 수 있습니다. 제공한 **Public Key는 이 Gateway 방식의 봇에서 사용하지 않습니다**. Public Key는 HTTP interactions endpoint로 들어오는 요청의 서명을 검증할 때 쓰며, 이 봇은 `discord.py` Gateway 연결로 슬래시 명령을 처리합니다. Application ID와 Public Key는 Bot Token을 대체하지 않습니다.
 
 필요 권한:
 
