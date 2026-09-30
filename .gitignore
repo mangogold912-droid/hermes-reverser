@@ -10,3 +10,12 @@ captures/
 *.apk
 *.ap_
 *.aab
+
+# Python Discord bot secrets and runtime data
+brawl-discord-bot/.env
+brawl-discord-bot/.venv/
+brawl-discord-bot/__pycache__/
+brawl-discord-bot/**/__pycache__/
+brawl-discord-bot/data/
+*.py[cod]
+*.sqlite3

@@ -1,0 +1,1160 @@
+from __future__ import annotations
+
+import asyncio
+import logging
+from dataclasses import replace
+from datetime import date, datetime, time, timedelta, timezone
+from typing import Any
+
+import discord
+from discord import app_commands
+from discord.ext import commands
+
+from brawl_bot.battle_logic import BattleDecision, evaluate_pair_logs
+from brawl_bot.brawl_api import BrawlAPIError, BrawlStarsAPI, normalize_tag
+from brawl_bot.config import Settings, load_settings
+from brawl_bot.database import Database
+
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+log = logging.getLogger("brawl-elimination-bot")
+
+
+async def _send_ephemeral(interaction: discord.Interaction, content: str) -> None:
+    if interaction.response.is_done():
+        await interaction.followup.send(content, ephemeral=True)
+    else:
+        await interaction.response.send_message(content, ephemeral=True)
+
+
+def _is_admin(interaction: discord.Interaction) -> bool:
+    if interaction.guild is not None and interaction.guild.owner_id == interaction.user.id:
+        return True
+    permissions = getattr(interaction.user, "guild_permissions", None)
+    return bool(permissions and permissions.administrator)
+
+
+class DailyQueueView(discord.ui.View):
+    """Persistent join button for the current daily event."""
+
+    def __init__(self, bot: "BrawlEliminationBot") -> None:
+        super().__init__(timeout=None)
+        self.bot = bot
+
+    @discord.ui.button(
+        label="오늘 참가하기",
+        style=discord.ButtonStyle.success,
+        custom_id="brawl_elimination:daily_join:v1",
+    )
+    async def join_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if interaction.guild_id != self.bot.settings.guild_id:
+            await _send_ephemeral(interaction, "이 버튼은 설정된 대회 서버에서만 사용할 수 있습니다.")
+            return
+        if interaction.user.bot:
+            await _send_ephemeral(interaction, "봇 계정은 참가할 수 없습니다.")
+            return
+        if interaction.guild is None or interaction.guild.verification_level != discord.VerificationLevel.highest:
+            await _send_ephemeral(
+                interaction,
+                "전화번호 인증을 위해 메인 서버 Verification Level을 Highest로 설정해야 참가할 수 있습니다. 관리자에게 알려 주세요.",
+            )
+            return
+
+        event = await self.bot.db.get_active_event()
+        if not event or event["status"] != "open":
+            await _send_ephemeral(interaction, "현재 참가 신청을 받는 이벤트가 없습니다.")
+            return
+        if event.get("queue_message_id") and int(event["queue_message_id"]) != interaction.message.id:
+            await _send_ephemeral(interaction, "지난 이벤트의 버튼입니다. 오늘 올라온 참가 버튼을 사용해 주세요.")
+            return
+
+        protected_id = await self.bot.db.get_protected_user_id()
+        protected_tag = await self.bot.db.get_protected_brawl_tag()
+        if protected_id is None or protected_tag is None:
+            await _send_ephemeral(interaction, "관리자가 /set_protected로 보호 Discord 계정과 브롤 태그를 설정해야 합니다.")
+            return
+        if _is_admin(interaction) and interaction.user.id != protected_id:
+            await _send_ephemeral(interaction, "안전 설정상 서버 관리자는 대회 참가자로 등록할 수 없습니다.")
+            return
+
+        try:
+            joined = await self.bot.db.join_queue(
+                int(event["id"]),
+                interaction.user.id,
+                self.bot.settings.event_size,
+            )
+        except ValueError as exc:
+            await _send_ephemeral(interaction, str(exc))
+            return
+
+        if joined["started"]:
+            await _send_ephemeral(interaction, "10명 모집 완료! 순번대로 대진을 만들고 경기를 확인합니다.")
+            await self.bot.refresh_queue_message(int(event["id"]))
+            await self.bot.announce_round(int(event["id"]), 1)
+        else:
+            await _send_ephemeral(
+                interaction,
+                f"참가 완료: **{joined['seed']}번** (현재 {joined['count']}/10명)",
+            )
+            await self.bot.refresh_queue_message(int(event["id"]))
+
+
+class BrawlEliminationBot(commands.Bot):
+    def __init__(self, settings: Settings) -> None:
+        intents = discord.Intents.default()
+        # Required to verify entrants to the secondary winners-only server.
+        intents.members = True
+        super().__init__(command_prefix="!", intents=intents, help_command=None)
+        self.settings = settings
+        self.db = Database(settings.database_path)
+        self.db.bind_guild(settings.guild_id)
+        self.brawl_api = BrawlStarsAPI(settings.brawl_stars_api_token)
+        self._daily_task: asyncio.Task[None] | None = None
+        self._poll_task: asyncio.Task[None] | None = None
+        self._view_registered = False
+        self._register_app_commands()
+
+    async def setup_hook(self) -> None:
+        await self.db.open(
+            self.settings.protected_discord_id,
+            self.settings.protected_brawl_tag,
+            self.settings.winner_guild_id,
+            self.settings.winner_invite_channel_id,
+        )
+        destination = await self.db.get_winner_destination()
+        if destination:
+            self.settings = replace(
+                self.settings,
+                winner_guild_id=destination[0],
+                winner_invite_channel_id=destination[1],
+            )
+        await self.brawl_api.start()
+        if not self._view_registered:
+            self.add_view(DailyQueueView(self))
+            self._view_registered = True
+
+        guild = discord.Object(id=self.settings.guild_id)
+        await self.tree.sync(guild=guild)
+        log.info("Slash commands synced to guild %s", self.settings.guild_id)
+
+        self._daily_task = asyncio.create_task(self._daily_scheduler(), name="daily-queue-scheduler")
+        self._poll_task = asyncio.create_task(self._match_poller(), name="battle-log-poller")
+
+    async def close(self) -> None:
+        for task in (self._daily_task, self._poll_task):
+            if task is not None:
+                task.cancel()
+        tasks = [task for task in (self._daily_task, self._poll_task) if task is not None]
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        await self.brawl_api.close()
+        await self.db.close()
+        await super().close()
+
+    async def on_ready(self) -> None:
+        log.info("Connected as %s (%s)", self.user, self.user.id if self.user else "unknown")
+
+    async def on_member_join(self, member: discord.Member) -> None:
+        target_guild_id = self.settings.winner_guild_id
+        if target_guild_id is None or member.guild.id != target_guild_id:
+            return
+        if self.user and member.id == self.user.id:
+            return
+        if member.id == member.guild.owner_id or member.id in self.settings.winner_server_staff_ids:
+            return
+
+        try:
+            protected_id = await self.db.get_protected_user_id()
+            qualified = protected_id is not None and await self.db.is_qualified_winner(member.id, protected_id)
+        except Exception:
+            # Fail closed: if qualification cannot be verified, do not leave a new member in the winners-only guild.
+            log.exception("Could not verify destination-guild joiner %s; rejecting the join", member.id)
+            protected_id = None
+            qualified = False
+        if qualified:
+            await self.db.mark_winner_joined(member.id, protected_id)
+            log.info("Qualified protected-target winner %s joined winner guild %s", member.id, member.guild.id)
+            return
+
+        try:
+            await member.kick(reason="Winners-only server: this Discord account has not defeated the protected player.")
+            log.info("Removed non-qualified user %s from winner guild %s", member.id, member.guild.id)
+        except discord.Forbidden:
+            log.error("Could not remove non-qualified user %s from winner guild; check Kick Members and role position", member.id)
+        except discord.HTTPException:
+            log.exception("Discord API failed while removing non-qualified user %s", member.id)
+
+    def _register_app_commands(self) -> None:
+        guild = discord.Object(id=self.settings.guild_id)
+
+        @app_commands.command(name="register", description="유효한 브롤 태그를 등록하고 바로 대회에 참가할 수 있게 합니다.")
+        @app_commands.describe(tag="게임 프로필의 플레이어 태그 (#은 생략해도 됩니다)")
+        async def register(interaction: discord.Interaction, tag: str) -> None:
+            try:
+                canonical_tag = normalize_tag(tag)
+                profile = await self.brawl_api.get_player(canonical_tag)
+            except ValueError as exc:
+                await _send_ephemeral(interaction, str(exc))
+                return
+            except BrawlAPIError as exc:
+                await _send_ephemeral(interaction, str(exc))
+                return
+
+            profile_tag = profile.get("tag")
+            confirmed_tag = normalize_tag(profile_tag if isinstance(profile_tag, str) else canonical_tag)
+            player_name = str(profile.get("name") or "Unknown")[:100]
+            try:
+                await self.db.register_tag(interaction.user.id, confirmed_tag, player_name)
+            except ValueError as exc:
+                await _send_ephemeral(interaction, str(exc))
+                return
+            except Exception:
+                log.exception("Could not save tag registration for user %s", interaction.user.id)
+                await _send_ephemeral(interaction, "태그 등록을 저장하지 못했습니다. 관리자에게 알려 주세요.")
+                return
+
+            await _send_ephemeral(
+                interaction,
+                f"태그 등록 완료: **{player_name}** ({confirmed_tag}). 관리자 승인 없이 참가할 수 있습니다.\n"
+                "주의: 태그가 실제 계정인지 확인했지만 소유자 인증은 되지 않습니다. 본인 태그만 등록해 주세요."
+            )
+
+        @app_commands.command(name="my_tag", description="내 브롤 태그 등록 상태를 확인합니다.")
+        async def my_tag(interaction: discord.Interaction) -> None:
+            registration = await self.db.get_registration(interaction.user.id)
+            if not registration:
+                await _send_ephemeral(interaction, "등록된 태그가 없습니다. /register로 먼저 등록해 주세요.")
+                return
+            labels = {"pending": "이전 등록 승인 대기", "approved": "등록됨", "rejected": "등록 거절됨"}
+            await _send_ephemeral(
+                interaction,
+                f"**{registration['player_name']}** ({registration['player_tag']}) · "
+                f"상태: {labels.get(registration['status'], registration['status'])}",
+            )
+
+        @app_commands.command(name="leave_queue", description="10명 모집이 완료되기 전에 오늘 대기열에서 나갑니다.")
+        async def leave_queue(interaction: discord.Interaction) -> None:
+            try:
+                remaining = await self.db.leave_queue(interaction.user.id)
+            except ValueError as exc:
+                await _send_ephemeral(interaction, str(exc))
+                return
+            event = await self.db.get_active_event()
+            if event:
+                await self.refresh_queue_message(int(event["id"]))
+            await _send_ephemeral(interaction, f"대기열에서 나왔습니다. 남은 인원은 {remaining}/10명입니다.")
+
+        @app_commands.command(name="set_protected", description="자동 영구밴에서 제외할 Discord 계정과 고정 브롤 태그를 설정합니다.")
+        @app_commands.describe(member="보호할 Discord 계정", tag="해당 계정의 고정 브롤 태그")
+        @app_commands.default_permissions(administrator=True)
+        async def set_protected(interaction: discord.Interaction, member: discord.Member, tag: str) -> None:
+            if not _is_admin(interaction):
+                await _send_ephemeral(interaction, "이 명령은 서버 관리자만 사용할 수 있습니다.")
+                return
+            try:
+                canonical_tag = normalize_tag(tag)
+                profile = await self.brawl_api.get_player(canonical_tag)
+                confirmed_tag = normalize_tag(str(profile.get("tag") or canonical_tag))
+                player_name = str(profile.get("name") or "Protected player")[:100]
+                await self.db.set_protected_account(member.id, confirmed_tag, player_name)
+            except (ValueError, BrawlAPIError) as exc:
+                await _send_ephemeral(interaction, str(exc))
+                return
+            except Exception:
+                log.exception("Could not set protected Discord/Brawl account pair")
+                await _send_ephemeral(interaction, "보호 계정을 저장하지 못했습니다. 태그/데이터베이스를 확인해 주세요.")
+                return
+            await _send_ephemeral(
+                interaction,
+                f"{member.mention} · **{player_name}** ({confirmed_tag})을 보호 대상으로 설정했습니다. "
+                "이 Discord 계정은 경기에서 져도 자동 영구밴되지 않습니다.",
+            )
+            now = datetime.now(self.settings.time_zone)
+            scheduled_today = datetime.combine(
+                now.date(),
+                time(self.settings.daily_open_hour, self.settings.daily_open_minute),
+                tzinfo=self.settings.time_zone,
+            )
+            if now >= scheduled_today and await self.db.get_active_event() is None:
+                await self._open_daily_event(now.date())
+
+        @app_commands.command(name="set_winner_server", description="보호 대상을 이긴 참가자가 초대를 받을 보조 서버를 설정합니다.")
+        @app_commands.describe(
+            guild_id="보조 서버 ID (봇이 해당 서버에 먼저 초대되어 있어야 합니다)",
+            invite_channel_id="해당 보조 서버의 초대 채널 ID",
+        )
+        @app_commands.default_permissions(administrator=True)
+        async def set_winner_server(interaction: discord.Interaction, guild_id: str, invite_channel_id: str) -> None:
+            if not _is_admin(interaction):
+                await _send_ephemeral(interaction, "이 명령은 서버 관리자만 사용할 수 있습니다.")
+                return
+            if not guild_id.isdecimal() or int(guild_id) <= 0 or not invite_channel_id.isdecimal() or int(invite_channel_id) <= 0:
+                await _send_ephemeral(interaction, "서버 ID와 채널 ID는 양의 숫자로 입력해 주세요.")
+                return
+            target_guild_id = int(guild_id)
+            target_channel_id = int(invite_channel_id)
+            if target_guild_id == self.settings.guild_id:
+                await _send_ephemeral(interaction, "보조 서버는 메인 대회 서버와 달라야 합니다.")
+                return
+            if await self.db.get_protected_user_id() is None or await self.db.get_protected_brawl_tag() is None:
+                await _send_ephemeral(interaction, "먼저 /set_protected로 보호 계정과 Brawl 태그를 설정해 주세요.")
+                return
+            target_guild = self.get_guild(target_guild_id)
+            if target_guild is None:
+                await _send_ephemeral(interaction, "봇이 보조 서버에 없습니다. 먼저 봇을 해당 서버에 초대한 뒤 다시 시도해 주세요.")
+                return
+            bot_member = target_guild.me
+            if bot_member is None or not bot_member.guild_permissions.kick_members:
+                await _send_ephemeral(interaction, "보조 서버에서 봇에 Kick Members 권한을 부여한 뒤 다시 시도해 주세요.")
+                return
+            try:
+                channel = await self._fetch_channel(target_channel_id)
+            except discord.HTTPException:
+                await _send_ephemeral(interaction, "초대 채널을 찾을 수 없습니다. 채널 ID와 봇의 조회 권한을 확인해 주세요.")
+                return
+            channel_guild = getattr(channel, "guild", None)
+            if channel_guild is None or channel_guild.id != target_guild_id:
+                await _send_ephemeral(interaction, "초대 채널은 입력한 보조 서버 안에 있어야 합니다.")
+                return
+            create_invite = getattr(channel, "create_invite", None)
+            permissions_for = getattr(channel, "permissions_for", None)
+            if not callable(create_invite) or not callable(permissions_for):
+                await _send_ephemeral(interaction, "초대 채널 ID는 초대를 만들 수 있는 텍스트/음성 채널이어야 합니다.")
+                return
+            if not permissions_for(bot_member).create_instant_invite:
+                await _send_ephemeral(interaction, "해당 채널에서 봇에 Create Instant Invite 권한을 부여해 주세요.")
+                return
+            try:
+                await self.db.set_winner_destination(target_guild_id, target_channel_id)
+            except ValueError as exc:
+                await _send_ephemeral(interaction, str(exc))
+                return
+            self.settings = replace(
+                self.settings,
+                winner_guild_id=target_guild_id,
+                winner_invite_channel_id=target_channel_id,
+            )
+            await _send_ephemeral(
+                interaction,
+                f"보조 서버를 **{target_guild.name}** (`{target_guild_id}`)로 설정했습니다. "
+                "자격자에게 1회용 초대를 DM하며, 자격 없는 신규 입장자는 추방됩니다. "
+                "기존 멤버 정리는 필요할 때만 `/audit_winner_server confirm:true`로 실행하세요.",
+            )
+
+        @app_commands.command(name="phone_verification_status", description="Discord 서버의 전화번호 인증 요구 설정을 확인합니다.")
+        @app_commands.default_permissions(administrator=True)
+        async def phone_verification_status(interaction: discord.Interaction) -> None:
+            if not _is_admin(interaction):
+                await _send_ephemeral(interaction, "이 명령은 서버 관리자만 사용할 수 있습니다.")
+                return
+            guild = interaction.guild
+            if guild is None:
+                await _send_ephemeral(interaction, "서버 안에서만 사용할 수 있습니다.")
+                return
+            level = guild.verification_level
+            if level == discord.VerificationLevel.highest:
+                message = (
+                    "전화번호 인증 요구가 켜져 있습니다 (Discord Verification Level: **Highest**). "
+                    "Discord가 미인증 계정의 서버 참여를 제한합니다. 봇은 전화번호 자체나 인증 자료를 볼 수 없습니다."
+                )
+            else:
+                message = (
+                    f"현재 Verification Level은 **{level.name}**이며 전화번호 인증은 강제되지 않습니다. "
+                    "전화 인증 계정만 받으려면 서버 설정 → Safety Setup → Verification Level에서 **Highest**를 선택하세요. "
+                    "이 설정은 대회 참가자뿐 아니라 서버 전체 멤버에게 적용됩니다."
+                )
+            await _send_ephemeral(interaction, message)
+
+        @app_commands.command(name="enable_phone_verification", description="Discord 서버의 Verification Level을 Highest로 설정합니다.")
+        @app_commands.describe(confirm="True로 실행하면 서버 전체 멤버에게 전화번호 인증 요구가 적용됩니다.")
+        @app_commands.default_permissions(administrator=True)
+        async def enable_phone_verification(interaction: discord.Interaction, confirm: bool = False) -> None:
+            if not _is_admin(interaction):
+                await _send_ephemeral(interaction, "이 명령은 서버 관리자만 사용할 수 있습니다.")
+                return
+            guild = interaction.guild
+            if guild is None:
+                await _send_ephemeral(interaction, "서버 안에서만 사용할 수 있습니다.")
+                return
+            if not confirm:
+                await _send_ephemeral(
+                    interaction,
+                    "이 설정은 메인 서버 전체 멤버에게 영향을 줍니다. 적용하려면 `confirm: True`로 실행해 주세요.",
+                )
+                return
+            try:
+                updated_guild = await guild.edit(
+                    verification_level=discord.VerificationLevel.highest,
+                    reason=f"Phone verification enabled by administrator {interaction.user.id}",
+                )
+                cached_guild = self.get_guild(guild.id)
+                if cached_guild is not None:
+                    cached_guild.verification_level = updated_guild.verification_level
+            except discord.Forbidden:
+                await _send_ephemeral(
+                    interaction,
+                    "봇에 Manage Server 권한이 없습니다. 권한을 추가하거나 서버 설정 → Safety Setup에서 직접 Highest로 바꿔 주세요.",
+                )
+                return
+            except discord.HTTPException:
+                log.exception("Could not enable phone verification on guild %s", guild.id)
+                await _send_ephemeral(interaction, "Discord 서버 인증 수준을 변경하지 못했습니다. 잠시 후 다시 시도해 주세요.")
+                return
+            await _send_ephemeral(
+                interaction,
+                f"{updated_guild.name} 서버의 Verification Level을 **Highest**로 설정했습니다. "
+                "전화번호 인증 처리는 Discord가 담당하며, 이 설정은 서버 전체에 적용됩니다.",
+            )
+            now = datetime.now(self.settings.time_zone)
+            scheduled_today = datetime.combine(
+                now.date(),
+                time(self.settings.daily_open_hour, self.settings.daily_open_minute),
+                tzinfo=self.settings.time_zone,
+            )
+            if now >= scheduled_today and await self.db.get_active_event() is None:
+                await self._open_daily_event(now.date())
+
+        @app_commands.command(name="open_event", description="관리자가 오늘의 10인 참가 모집을 즉시 엽니다.")
+        @app_commands.default_permissions(administrator=True)
+        async def open_event(interaction: discord.Interaction) -> None:
+            if not _is_admin(interaction):
+                await _send_ephemeral(interaction, "이 명령은 서버 관리자만 사용할 수 있습니다.")
+                return
+            try:
+                event_id = await self.open_queue(event_key=None, event_date=datetime.now(self.settings.time_zone).date())
+            except ValueError as exc:
+                await _send_ephemeral(interaction, str(exc))
+                return
+            except Exception:
+                log.exception("Could not open a manual event")
+                await _send_ephemeral(interaction, "참가 모집을 열지 못했습니다. 채널 ID와 봇 권한을 확인해 주세요.")
+                return
+            await _send_ephemeral(interaction, f"이벤트 #{event_id} 참가 버튼을 설정된 모집 채널에 올렸습니다.")
+
+        @app_commands.command(name="event_status", description="오늘 이벤트의 참가자, 대진 및 진행 상태를 확인합니다.")
+        async def event_status(interaction: discord.Interaction) -> None:
+            snapshot = await self.db.get_active_event_snapshot()
+            if not snapshot:
+                await _send_ephemeral(interaction, "진행 중인 이벤트가 없습니다.")
+                return
+            event = snapshot["event"]
+            players = snapshot["players"]
+            lines = [f"상태: **{event['status']}** · 참가자 **{len(players)}/10**"]
+            if event["status"] == "open":
+                lines.extend(f"{row['seed']}번 · <@{row['user_id']}> · {row['player_name']}" for row in players)
+            else:
+                lines.append(f"현재 라운드: **{event['current_round']}**")
+                for match in snapshot["matches"]:
+                    label = f"R{match['round_no']}-M{match['slot_no']}"
+                    state = match["status"]
+                    if state == "completed":
+                        state = f"완료 ({match['ban_status'] or '결과 저장'})"
+                    else:
+                        state = "경기 기록 확인 중" if state == "monitoring" else "밴 처리 중"
+                    lines.append(
+                        f"**{label}** · <@{match['player1_user_id']}> vs <@{match['player2_user_id']}> · {state}"
+                    )
+                for bye in snapshot["byes"]:
+                    lines.append(f"부전승 · <@{bye['user_id']}> ({bye['player_name']})")
+            text = "\n".join(lines)
+            await _send_ephemeral(interaction, text[:1900])
+
+        @app_commands.command(name="cancel_event", description="관리자가 참가 모집 또는 진행 중인 이벤트를 취소합니다.")
+        @app_commands.default_permissions(administrator=True)
+        async def cancel_event(interaction: discord.Interaction) -> None:
+            if not _is_admin(interaction):
+                await _send_ephemeral(interaction, "이 명령은 서버 관리자만 사용할 수 있습니다.")
+                return
+            event = await self.db.get_active_event()
+            if not event:
+                await _send_ephemeral(interaction, "취소할 이벤트가 없습니다.")
+                return
+            try:
+                await self.db.cancel_event(int(event["id"]))
+            except ValueError as exc:
+                await _send_ephemeral(interaction, str(exc))
+                return
+            await self.refresh_queue_message(int(event["id"]))
+            await _send_ephemeral(interaction, f"이벤트 #{event['id']}을 취소했습니다. 자동 밴은 실행되지 않았습니다.")
+
+        @app_commands.command(name="resolve_match", description="API로 판정되지 않은 현재 경기의 승자를 관리자가 직접 확정합니다.")
+        @app_commands.describe(slot="/event_status에 표시된 현재 라운드 경기 번호(M)", winner="승자로 확정할 두 참가자 중 한 명")
+        @app_commands.default_permissions(administrator=True)
+        async def resolve_match(interaction: discord.Interaction, slot: app_commands.Range[int, 1, 10], winner: discord.Member) -> None:
+            if not _is_admin(interaction):
+                await _send_ephemeral(interaction, "이 명령은 서버 관리자만 사용할 수 있습니다.")
+                return
+            event = await self.db.get_active_event()
+            if not event or event["status"] != "active":
+                await _send_ephemeral(interaction, "진행 중인 대회가 없습니다.")
+                return
+            match = await self.db.get_match_by_slot(int(event["id"]), int(event["current_round"]), int(slot))
+            if not match or match["status"] != "monitoring":
+                await _send_ephemeral(interaction, "해당 번호의 판정 대기 경기를 찾지 못했습니다.")
+                return
+            if winner.id not in {int(match["player1_user_id"]), int(match["player2_user_id"])}:
+                await _send_ephemeral(interaction, "승자는 해당 경기의 두 참가자 중 한 명이어야 합니다.")
+                return
+            loser_id = int(match["player2_user_id"] if winner.id == int(match["player1_user_id"]) else match["player1_user_id"])
+            accepted = await self.db.mark_pending_ban(
+                int(match["id"]),
+                winner_user_id=winner.id,
+                loser_user_id=loser_id,
+                battle_key_value=f"manual:{match['id']}:{int(datetime.now(timezone.utc).timestamp())}",
+                result_kind="admin_manual",
+            )
+            if not accepted:
+                await _send_ephemeral(interaction, "이미 다른 처리에서 결과를 확정했습니다.")
+                return
+            await self.process_pending_match(int(match["id"]))
+            await _send_ephemeral(
+                interaction,
+                f"관리자 판정으로 R{match['round_no']}-M{match['slot_no']} 승자를 {winner.mention}로 확정했습니다. "
+                f"DRY_RUN={str(self.settings.dry_run).lower()} 설정이 밴 실행 여부를 결정합니다.",
+            )
+
+        @app_commands.command(name="unban", description="관리자만 영구밴을 해제합니다. 대상의 Discord 사용자 ID를 입력하세요.")
+        @app_commands.describe(user_id="밴을 해제할 Discord 사용자 ID", reason="밴 해제 사유(선택)")
+        @app_commands.default_permissions(administrator=True)
+        async def unban(interaction: discord.Interaction, user_id: str, reason: str = "관리자 요청") -> None:
+            if not _is_admin(interaction):
+                await _send_ephemeral(interaction, "영구밴 해제는 서버 관리자만 할 수 있습니다.")
+                return
+            if not user_id.isdecimal() or int(user_id) <= 0:
+                await _send_ephemeral(interaction, "Discord 사용자 ID는 숫자로 입력해 주세요.")
+                return
+            guild = interaction.guild
+            if guild is None:
+                await _send_ephemeral(interaction, "서버 안에서만 사용할 수 있습니다.")
+                return
+            target_user_id = int(user_id)
+            if await self.db.has_pending_tournament_ban(target_user_id):
+                await _send_ephemeral(interaction, "결과가 확정된 밴 처리가 아직 대기 중입니다. 봇 권한을 확인하면 자동 재시도합니다.")
+                return
+            discord_unbanned = False
+            try:
+                await guild.unban(discord.Object(id=target_user_id), reason=f"Admin unban: {reason[:400]}")
+                discord_unbanned = True
+            except discord.NotFound:
+                # A prior run may have removed the Discord ban but failed before clearing the tag denylist.
+                pass
+            except discord.Forbidden:
+                await _send_ephemeral(interaction, "봇에 밴 해제 권한이 없습니다. BAN_MEMBERS 권한을 확인해 주세요.")
+                return
+            except discord.HTTPException:
+                log.exception("Discord API failed while unbanning %s", user_id)
+                await _send_ephemeral(interaction, "Discord 밴 해제 요청에 실패했습니다. 잠시 후 다시 시도해 주세요.")
+                return
+            try:
+                cleared_tags = await self.db.clear_tournament_bans(target_user_id)
+            except Exception:
+                log.exception("Discord unban succeeded but tournament denylist cleanup failed for %s", user_id)
+                await _send_ephemeral(
+                    interaction,
+                    "Discord 밴은 해제했지만 Brawl 태그 밴 목록을 지우지 못했습니다. 같은 `/unban` 명령을 다시 실행해 주세요.",
+                )
+                return
+            if not discord_unbanned and not cleared_tags:
+                await _send_ephemeral(interaction, "Discord 밴이나 대회 태그 밴 기록이 없습니다.")
+                return
+            tag_note = f" 연결된 Brawl 태그 {', '.join(cleared_tags)}도 해제했습니다." if cleared_tags else ""
+            await _send_ephemeral(interaction, f"사용자 `{user_id}`의 Discord 밴을 해제했습니다.{tag_note}")
+
+        @app_commands.command(name="resend_winner_invite", description="보호 대상을 이긴 참가자에게 1회용 보조 서버 초대를 다시 보냅니다.")
+        @app_commands.describe(user_id="초대를 다시 보낼 참가자의 Discord 사용자 ID")
+        @app_commands.default_permissions(administrator=True)
+        async def resend_winner_invite(interaction: discord.Interaction, user_id: str) -> None:
+            if not _is_admin(interaction):
+                await _send_ephemeral(interaction, "이 명령은 서버 관리자만 사용할 수 있습니다.")
+                return
+            if not user_id.isdecimal() or int(user_id) <= 0:
+                await _send_ephemeral(interaction, "Discord 사용자 ID는 숫자로 입력해 주세요.")
+                return
+            winner_id = int(user_id)
+            protected_id = await self.db.get_protected_user_id()
+            if self.settings.winner_guild_id is None or protected_id is None:
+                await _send_ephemeral(interaction, "WINNER_GUILD_ID와 보호 대상을 먼저 설정해야 합니다.")
+                return
+            if not await self.db.is_qualified_winner(winner_id, protected_id):
+                await _send_ephemeral(interaction, "해당 계정은 현재 보호 대상을 이긴 기록이 없습니다.")
+                return
+            await self.db.update_winner_invite(winner_id, protected_id, status="pending")
+            await self.send_winner_invite(winner_id, protected_id)
+            record = await self.db.get_qualified_winner(winner_id, protected_id)
+            if record and record["invite_status"] in {"sent", "joined"}:
+                await _send_ephemeral(interaction, f"<@{winner_id}>에게 보조 서버 초대를 보냈습니다. (상태: {record['invite_status']})")
+            else:
+                details = record.get("failure_reason") if record else None
+                fallback = f"\n초대 URL: {record['invite_url']}" if record and record.get("invite_url") else ""
+                await _send_ephemeral(interaction, f"초대 전송에 실패했습니다. {details or ''}{fallback}"[:1900])
+
+        @app_commands.command(name="audit_winner_server", description="관리자가 보조 서버에서 보호 대상을 이기지 않은 계정을 정리합니다.")
+        @app_commands.describe(confirm="True로 설정하면 자격이 없는 기존 멤버를 서버에서 추방합니다.")
+        @app_commands.default_permissions(administrator=True)
+        async def audit_winner_server(interaction: discord.Interaction, confirm: bool = False) -> None:
+            if not _is_admin(interaction):
+                await _send_ephemeral(interaction, "이 명령은 서버 관리자만 사용할 수 있습니다.")
+                return
+            if self.settings.winner_guild_id is None:
+                await _send_ephemeral(interaction, "WINNER_GUILD_ID가 설정되지 않았습니다.")
+                return
+            if not confirm:
+                await _send_ephemeral(interaction, "실행하려면 `confirm: True`로 다시 호출해 주세요. 미승인 기존 멤버는 추방됩니다.")
+                return
+            target_guild = self.get_guild(self.settings.winner_guild_id)
+            if target_guild is None:
+                await _send_ephemeral(interaction, "봇이 보조 서버에 들어가 있지 않거나 서버 ID가 잘못되었습니다.")
+                return
+            protected_id = await self.db.get_protected_user_id()
+            if protected_id is None:
+                await _send_ephemeral(interaction, "먼저 메인 서버에서 /set_protected를 설정해 주세요.")
+                return
+            removed = 0
+            kept = 0
+            failed = 0
+            async for member in target_guild.fetch_members(limit=None):
+                if self.user and member.id == self.user.id:
+                    kept += 1
+                    continue
+                if member.id == target_guild.owner_id or member.id in self.settings.winner_server_staff_ids:
+                    kept += 1
+                    continue
+                if protected_id is not None and await self.db.is_qualified_winner(member.id, protected_id):
+                    kept += 1
+                    continue
+                try:
+                    await member.kick(reason="Winners-only server audit: not recorded as a winner against the protected player.")
+                    removed += 1
+                except discord.Forbidden:
+                    failed += 1
+                except discord.HTTPException:
+                    failed += 1
+            await _send_ephemeral(interaction, f"보조 서버 점검 완료: 추방 {removed}명, 유지 {kept}명, 실패 {failed}명.")
+
+        commands_to_add = (
+            register,
+            my_tag,
+            leave_queue,
+            set_protected,
+            set_winner_server,
+            phone_verification_status,
+            enable_phone_verification,
+            open_event,
+            event_status,
+            cancel_event,
+            resolve_match,
+            unban,
+            resend_winner_invite,
+            audit_winner_server,
+        )
+        for command in commands_to_add:
+            self.tree.add_command(command, guild=guild)
+
+    async def _fetch_channel(self, channel_id: int) -> Any:
+        channel = self.get_channel(channel_id)
+        if channel is not None:
+            return channel
+        return await self.fetch_channel(channel_id)
+
+    async def open_queue(self, *, event_key: str | None, event_date: date) -> int:
+        protected_id = await self.db.get_protected_user_id()
+        protected_tag = await self.db.get_protected_brawl_tag()
+        if protected_id is None or protected_tag is None:
+            raise ValueError("먼저 관리자가 /set_protected로 보호 Discord 계정과 브롤 태그를 설정해야 합니다.")
+        source_guild = self.get_guild(self.settings.guild_id)
+        if source_guild is None or source_guild.verification_level != discord.VerificationLevel.highest:
+            raise ValueError("전화번호 인증을 강제하려면 메인 서버 Verification Level을 Highest로 설정해야 합니다.")
+        event_id = await self.db.create_event(
+            event_key=event_key,
+            event_date=event_date.isoformat(),
+            queue_channel_id=self.settings.queue_channel_id,
+            result_channel_id=self.settings.result_channel_id,
+        )
+        try:
+            channel = await self._fetch_channel(self.settings.queue_channel_id)
+            embed = discord.Embed(
+                title="오늘의 브롤스타즈 탈락전 참가 모집",
+                description=(
+                    "브롤 태그를 등록하고 **오늘 참가하기**를 눌러 주세요.\n"
+                    "10명이 모이면 순번을 확정하고, 순번대로 바운티 모드 1대1 대진을 시작합니다.\n"
+                    "무승부·불명확한 기록은 밴하지 않습니다."
+                ),
+                color=discord.Color.gold(),
+                timestamp=datetime.now(timezone.utc),
+            )
+            embed.add_field(name="참가 인원", value="0 / 10", inline=True)
+            embed.add_field(
+                name="자동 밴 모드",
+                value="시험 모드(DRY_RUN)" if self.settings.dry_run else "영구 밴 활성화",
+                inline=True,
+            )
+            message = await channel.send(embed=embed, view=DailyQueueView(self))
+            await self.db.set_queue_message_id(event_id, message.id)
+        except Exception:
+            log.exception("Failed to post queue panel for event %s", event_id)
+            try:
+                await self.db.cancel_event(event_id)
+            except Exception:
+                log.exception("Could not cancel event after posting failure")
+            raise
+        log.info("Opened event %s for %s", event_id, event_date.isoformat())
+        return event_id
+
+    async def refresh_queue_message(self, event_id: int) -> None:
+        event = await self.db.get_event(event_id)
+        if not event or not event.get("queue_message_id"):
+            return
+        try:
+            channel = await self._fetch_channel(int(event["queue_channel_id"]))
+            message = await channel.fetch_message(int(event["queue_message_id"]))
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            log.warning("Queue message for event %s could not be fetched", event_id)
+            return
+        players = await self.db.get_event_players(event_id)
+        state = event["status"]
+        if state == "open":
+            title = "오늘의 브롤스타즈 탈락전 참가 모집"
+            description = "브롤 태그를 등록하고 버튼을 눌러 참가하세요. 10명이 모이면 자동으로 대진을 시작합니다."
+            view = DailyQueueView(self)
+            for child in view.children:
+                if isinstance(child, discord.ui.Button):
+                    child.disabled = False
+        elif state == "active":
+            title = "참가 마감 — 대진 진행 중"
+            description = f"10명 모집이 완료되어 현재 **{event['current_round']}라운드**를 진행 중입니다."
+            view = DailyQueueView(self)
+            for child in view.children:
+                if isinstance(child, discord.ui.Button):
+                    child.disabled = True
+        else:
+            title = "이벤트 종료"
+            description = f"이 이벤트는 **{state}** 상태입니다."
+            view = DailyQueueView(self)
+            for child in view.children:
+                if isinstance(child, discord.ui.Button):
+                    child.disabled = True
+        roster = "\n".join(
+            f"**{player['seed']}번** · <@{player['user_id']}> · {player['player_name']} ({player['player_tag']})"
+            for player in players
+        ) or "아직 참가자가 없습니다."
+        embed = discord.Embed(title=title, description=description, color=discord.Color.gold())
+        embed.add_field(name="참가 인원", value=f"{len(players)} / 10", inline=True)
+        embed.add_field(name="현재 모드", value="시험 모드" if self.settings.dry_run else "영구 밴 활성화", inline=True)
+        embed.add_field(name="순번", value=roster[:1024], inline=False)
+        await message.edit(embed=embed, view=view)
+
+    async def announce_round(self, event_id: int, round_no: int) -> None:
+        event = await self.db.get_event(event_id)
+        if not event:
+            return
+        matches = await self.db.get_round_matches(event_id, round_no)
+        byes = await self.db.get_round_byes(event_id, round_no)
+        lines = [
+            f"**R{row['round_no']}-M{row['slot_no']}** · <@{row['player1_user_id']}> ({row['name1']} / {row['tag1']}) "
+            f"vs <@{row['player2_user_id']}> ({row['name2']} / {row['tag2']})"
+            for row in matches
+        ]
+        lines.extend(f"**부전승** · <@{row['user_id']}> ({row['player_name']})" for row in byes)
+        if not lines:
+            return
+        mode_text = "시험 모드: 밴 없이 대진만 진행" if self.settings.dry_run else "패자는 경기 결과가 확인되면 영구 밴됩니다."
+        embed = discord.Embed(
+            title=f"브롤스타즈 대진 — {round_no}라운드",
+            description="\n".join(lines)[:4000],
+            color=discord.Color.blurple(),
+        )
+        embed.set_footer(text=f"감지 모드: {', '.join(self.settings.allowed_modes)} · {mode_text}")
+        await self._send_to_channel(int(event["result_channel_id"]), embed=embed)
+
+    async def _send_to_channel(self, channel_id: int, *, content: str | None = None, embed: discord.Embed | None = None) -> None:
+        try:
+            channel = await self._fetch_channel(channel_id)
+            await channel.send(
+                content=content,
+                embed=embed,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            log.exception("Could not send message to channel %s", channel_id)
+
+    async def _daily_scheduler(self) -> None:
+        await self.wait_until_ready()
+        zone = self.settings.time_zone
+        now = datetime.now(zone)
+        scheduled_today = datetime.combine(
+            now.date(),
+            time(self.settings.daily_open_hour, self.settings.daily_open_minute),
+            tzinfo=zone,
+        )
+        # If the process starts after today's scheduled time, try to create
+        # today's event once instead of silently waiting until tomorrow.
+        if now >= scheduled_today:
+            await self._open_daily_event(now.date())
+
+        while not self.is_closed():
+            now = datetime.now(zone)
+            target = datetime.combine(
+                now.date(),
+                time(self.settings.daily_open_hour, self.settings.daily_open_minute),
+                tzinfo=zone,
+            )
+            if target <= now:
+                target += timedelta(days=1)
+            await asyncio.sleep(max(1.0, (target - now).total_seconds()))
+            await self._open_daily_event(datetime.now(zone).date())
+
+    async def _open_daily_event(self, event_date: date) -> None:
+        event_key = f"daily-{event_date.isoformat()}"
+        if await self.db.get_event_by_key(event_key):
+            return
+        cancelled = await self.db.cancel_stale_open_events(event_date.isoformat())
+        for event_id in cancelled:
+            log.info("Cancelled stale open queue %s", event_id)
+
+        active = await self.db.get_active_event()
+        if active:
+            await self._send_to_channel(
+                self.settings.result_channel_id,
+                content=(
+                    f"오늘 자동 모집을 건너뛰었습니다. 이전 이벤트 #{active['id']}가 아직 **{active['status']}** 상태입니다. "
+                    "관리자가 /event_status 또는 /cancel_event로 확인해 주세요."
+                ),
+            )
+            return
+        if await self.db.get_protected_user_id() is None or await self.db.get_protected_brawl_tag() is None:
+            await self._send_to_channel(
+                self.settings.result_channel_id,
+                content="오늘 참가 모집을 열지 않았습니다. 관리자가 /set_protected로 보호 Discord 계정과 브롤 태그를 먼저 설정해 주세요.",
+            )
+            return
+        try:
+            await self.open_queue(event_key=event_key, event_date=event_date)
+        except ValueError as exc:
+            await self._send_to_channel(
+                self.settings.result_channel_id,
+                content=f"오늘 모집을 열지 않았습니다: {exc}",
+            )
+        except Exception:
+            log.exception("Could not create daily event for %s", event_date.isoformat())
+
+    async def _match_poller(self) -> None:
+        await self.wait_until_ready()
+        while not self.is_closed():
+            try:
+                # Resume any result that was persisted just before a process restart.
+                for pending in await self.db.get_pending_ban_matches():
+                    await self.process_pending_match(int(pending["id"]))
+                protected_id = await self.db.get_protected_user_id()
+                if self.settings.winner_guild_id is not None and protected_id is not None:
+                    for qualified in await self.db.get_pending_winner_invites(protected_id):
+                        await self.send_winner_invite(int(qualified["user_id"]), protected_id)
+                await self._poll_active_matches()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("Unexpected error in battle-log poller")
+            await asyncio.sleep(self.settings.match_poll_seconds)
+
+    async def _poll_active_matches(self) -> None:
+        matches = await self.db.get_active_matches()
+        if not matches:
+            return
+
+        tags = sorted({str(match[key]) for match in matches for key in ("tag1", "tag2")})
+        semaphore = asyncio.Semaphore(3)
+        logs_by_tag: dict[str, list[dict[str, Any]]] = {}
+
+        async def fetch_log(tag: str) -> None:
+            async with semaphore:
+                try:
+                    logs_by_tag[tag] = await self.brawl_api.get_battle_log(tag)
+                except BrawlAPIError as exc:
+                    log.warning("Battle-log lookup failed for %s: %s", tag, exc)
+                except Exception:
+                    log.exception("Unexpected battle-log lookup failure for %s", tag)
+
+        await asyncio.gather(*(fetch_log(tag) for tag in tags))
+
+        for match in matches:
+            tag1 = str(match["tag1"])
+            tag2 = str(match["tag2"])
+            if tag1 not in logs_by_tag or tag2 not in logs_by_tag:
+                continue
+            ignored = await self.db.get_ignored_battle_keys(int(match["id"]))
+            decision = evaluate_pair_logs(
+                tag1,
+                tag2,
+                logs_by_tag[tag1],
+                logs_by_tag[tag2],
+                started_at=str(match["started_at"]),
+                allowed_modes=self.settings.allowed_modes,
+                ignored_battle_keys=ignored,
+            )
+            if decision is None:
+                continue
+            if decision.kind == "draw":
+                await self.db.ignore_battle(int(match["id"]), decision.battle_key, "draw")
+                await self._announce_draw(match, decision)
+                continue
+            if decision.kind != "decisive" or not decision.winner_tag or not decision.loser_tag:
+                continue
+
+            tag_to_user = {normalize_tag(tag1): int(match["player1_user_id"]), normalize_tag(tag2): int(match["player2_user_id"])}
+            winner_id = tag_to_user.get(normalize_tag(decision.winner_tag))
+            loser_id = tag_to_user.get(normalize_tag(decision.loser_tag))
+            if winner_id is None or loser_id is None or winner_id == loser_id:
+                log.error("Could not map API decision to participants for match %s", match["id"])
+                continue
+            accepted = await self.db.mark_pending_ban(
+                int(match["id"]),
+                winner_user_id=winner_id,
+                loser_user_id=loser_id,
+                battle_key_value=decision.battle_key,
+                result_kind="api",
+            )
+            if accepted:
+                await self.process_pending_match(int(match["id"]), decision=decision)
+
+    async def _announce_draw(self, match: dict[str, Any], decision: BattleDecision) -> None:
+        await self._send_to_channel(
+            int(match["result_channel_id"]),
+            content=(
+                f"R{match['round_no']}-M{match['slot_no']} 경기에서 무승부가 확인됐습니다. "
+                "아무도 밴하지 않았습니다. 두 참가자는 재경기해 주세요. "
+                f"(모드: {decision.mode}, 맵: {decision.map_name or '정보 없음'})"
+            ),
+        )
+
+    async def send_winner_invite(self, user_id: int, protected_user_id: int) -> None:
+        """DM a one-use invite to a verified winner; Discord requires the user to accept it."""
+        if self.settings.winner_guild_id is None or self.settings.winner_invite_channel_id is None:
+            return
+        record = await self.db.get_qualified_winner(user_id, protected_user_id)
+        if not record or record["invite_status"] in {"sent", "joined"}:
+            return
+
+        target_guild = self.get_guild(self.settings.winner_guild_id)
+        if target_guild is None:
+            await self.db.update_winner_invite(
+                user_id,
+                protected_user_id,
+                status="failed",
+                failure_reason="봇이 설정된 보조 서버에 없습니다.",
+            )
+            return
+
+        member = target_guild.get_member(user_id)
+        if member is None:
+            try:
+                member = await target_guild.fetch_member(user_id)
+            except discord.NotFound:
+                member = None
+            except discord.Forbidden:
+                await self.db.update_winner_invite(
+                    user_id,
+                    protected_user_id,
+                    status="failed",
+                    failure_reason="보조 서버 멤버 조회 권한이 없습니다.",
+                )
+                return
+            except discord.HTTPException:
+                log.exception("Could not check whether winner %s already joined the destination guild", user_id)
+                return
+        if member is not None:
+            await self.db.mark_winner_joined(user_id, protected_user_id)
+            return
+
+        invite_url: str | None = None
+        try:
+            channel = await self._fetch_channel(self.settings.winner_invite_channel_id)
+            channel_guild = getattr(channel, "guild", None)
+            if channel_guild is None or channel_guild.id != self.settings.winner_guild_id:
+                raise ValueError("WINNER_INVITE_CHANNEL_ID is not in WINNER_GUILD_ID")
+            create_invite = getattr(channel, "create_invite", None)
+            if not callable(create_invite):
+                raise ValueError("WINNER_INVITE_CHANNEL_ID must point to a channel that supports invites")
+            invite = await create_invite(
+                max_age=604800,
+                max_uses=1,
+                unique=True,
+                reason=f"Qualified by defeating protected player {protected_user_id}",
+            )
+            invite_url = invite.url
+            user = self.get_user(user_id) or await self.fetch_user(user_id)
+            await user.send(
+                "보호 대상과의 브롤스타즈 바운티 경기에서 승리해 보조 서버 초대를 받았습니다. "
+                "이 링크는 1회용이며 7일 후 만료됩니다. 직접 눌러 참가해야 합니다.\n"
+                f"{invite.url}",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            await self.db.update_winner_invite(
+                user_id,
+                protected_user_id,
+                status="sent",
+                invite_url=invite.url,
+                failure_reason=None,
+            )
+            log.info("Sent one-use destination invite to qualified player %s", user_id)
+        except discord.Forbidden:
+            await self.db.update_winner_invite(
+                user_id,
+                protected_user_id,
+                status="failed",
+                invite_url=invite_url,
+                failure_reason="DM 또는 초대 링크 생성이 차단되었습니다. 관리자에게 DM을 열거나 권한을 확인해 주세요.",
+            )
+        except ValueError as exc:
+            await self.db.update_winner_invite(
+                user_id,
+                protected_user_id,
+                status="failed",
+                failure_reason=str(exc),
+            )
+        except discord.HTTPException:
+            log.exception("Could not create or send destination invite for qualified player %s", user_id)
+            await self.db.update_winner_invite(
+                user_id,
+                protected_user_id,
+                status="failed",
+                invite_url=invite_url,
+                failure_reason="Discord API 요청에 실패했습니다. 관리자 명령으로 초대를 다시 보내 주세요.",
+            )
+        except Exception:
+            log.exception("Unexpected error while delivering destination invite to qualified player %s", user_id)
+            await self.db.update_winner_invite(
+                user_id,
+                protected_user_id,
+                status="failed",
+                invite_url=invite_url,
+                failure_reason="초대 처리 중 예기치 않은 오류가 발생했습니다. 관리자 명령으로 다시 시도해 주세요.",
+            )
+
+    async def process_pending_match(self, match_id: int, *, decision: BattleDecision | None = None) -> None:
+        match = await self.db.get_match(match_id)
+        if not match or match["status"] != "pending_ban":
+            return
+        loser_id = int(match["loser_user_id"])
+        winner_id = int(match["winner_user_id"])
+        protected_id = await self.db.get_protected_user_id()
+        protected_tag = await self.db.get_protected_brawl_tag()
+        loser_tag = normalize_tag(str(match["tag1"] if loser_id == int(match["player1_user_id"]) else match["tag2"]))
+        protected_tag_loser = protected_tag is not None and loser_tag == protected_tag
+        protected_loser = protected_id == loser_id or protected_tag_loser
+        protected_win_qualification = protected_id is not None and protected_tag_loser
+        ban_status = "pending"
+        failure_reason: str | None = None
+
+        if protected_loser:
+            ban_status = "protected"
+        elif self.settings.dry_run:
+            ban_status = "dry_run"
+        else:
+            await self.db.add_tournament_ban(
+                loser_id,
+                loser_tag,
+                event_id=int(match["event_id"]),
+                match_id=match_id,
+            )
+            guild = self.get_guild(int(match["guild_id"]))
+            if guild is None:
+                log.error("Guild %s unavailable while processing match %s", match["guild_id"], match_id)
+                return
+            target = discord.Object(id=loser_id)
+            try:
+                try:
+                    await guild.fetch_ban(target)
+                    # A previous request may have succeeded just before a crash.
+                    ban_status = "banned"
+                except discord.NotFound:
+                    reason = (
+                        f"Brawl Stars elimination: R{match['round_no']}-M{match['slot_no']}; "
+                        f"winner Discord ID {winner_id}; result {match['result_kind']}"
+                    )
+                    await guild.ban(target, reason=reason[:480], delete_message_seconds=0)
+                    ban_status = "banned"
+            except discord.Forbidden:
+                # Keep the decisive result pending. Once permissions or role order are fixed,
+                # the poller retries and advances the bracket only after the ban succeeds.
+                log.error("Cannot ban loser %s; check BAN_MEMBERS and bot role hierarchy", loser_id)
+                return
+            except discord.HTTPException as exc:
+                # Do not advance while Discord has not confirmed the required permanent ban.
+                log.warning("Discord API error while banning %s; will retry: %s", loser_id, exc)
+                return
+            except Exception:
+                log.exception("Unexpected error while banning Discord user %s", loser_id)
+                return
+
+        progression = await self.db.complete_pending_match(
+            match_id,
+            ban_status=ban_status,
+            protected_loser=protected_loser,
+            protected_user_id=protected_id,
+            protected_brawl_tag=protected_tag,
+            protected_win_qualification=protected_win_qualification,
+            failure_reason=failure_reason,
+        )
+        if protected_win_qualification and protected_id is not None:
+            await self.send_winner_invite(winner_id, protected_id)
+        if progression is None:
+            # None also means the round still has other matches in progress.
+            completed = await self.db.get_match(match_id)
+            if completed and completed["status"] == "completed":
+                await self._announce_match_result(completed, decision)
+            return
+
+        completed = await self.db.get_match(match_id)
+        if completed:
+            await self._announce_match_result(completed, decision)
+        if "new_round" in progression:
+            await self.announce_round(int(match["event_id"]), int(progression["new_round"]))
+        elif progression.get("champion_user_id"):
+            await self._send_to_channel(
+                int(match["result_channel_id"]),
+                content=f"🏆 오늘의 우승자: <@{progression['champion_user_id']}> — 대회가 종료됐습니다.",
+            )
+        await self.refresh_queue_message(int(match["event_id"]))
+
+    async def _announce_match_result(self, match: dict[str, Any], decision: BattleDecision | None) -> None:
+        winner_id = int(match["winner_user_id"])
+        loser_id = int(match["loser_user_id"])
+        status = str(match.get("ban_status") or "unknown")
+        if status == "banned":
+            action = f"<@{loser_id}>을(를) **영구 밴**했습니다."
+        elif status == "protected":
+            if match.get("winner_qualified"):
+                invite_note = "승자에게 보조 서버 1회용 초대를 보냅니다." if self.settings.winner_guild_id else "WINNER_GUILD_ID가 없어 보조 서버 초대는 설정 후 재전송할 수 있습니다."
+            else:
+                invite_note = "고정 보호 브롤 태그와 경기 기록이 일치하지 않아 승자 자격은 부여하지 않았습니다."
+            action = f"<@{loser_id}>은 보호 대상이므로 밴하지 않았습니다. (대진에서는 탈락) {invite_note}"
+        elif status == "dry_run":
+            action = f"시험 모드: <@{loser_id}>을(를) 밴할 상황이지만 실제 밴은 하지 않았습니다."
+        elif status == "failed":
+            action = f"⚠️ <@{loser_id}> 밴에 실패했습니다. 관리자 확인이 필요합니다. ({match.get('failure_reason') or '권한 오류'})"
+        else:
+            action = f"<@{loser_id}>의 밴 상태를 확인해 주세요."
+        suffix = ""
+        if decision is not None:
+            suffix = f" · {decision.mode} / {decision.map_name or '맵 정보 없음'}"
+        await self._send_to_channel(
+            int(match["result_channel_id"]),
+            content=(
+                f"R{match['round_no']}-M{match['slot_no']} 결과 확정: 승자 <@{winner_id}>. "
+                f"{action}{suffix}"
+            ),
+        )
+
+def main() -> None:
+    try:
+        settings = load_settings()
+    except Exception as exc:
+        raise SystemExit(f"Configuration error: {exc}") from exc
+    bot = BrawlEliminationBot(settings)
+    bot.run(settings.discord_token, log_handler=None)
+
+
+if __name__ == "__main__":
+    main()
