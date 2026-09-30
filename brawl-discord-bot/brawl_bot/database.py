@@ -7,7 +7,6 @@ from typing import Any
 import aiosqlite
 
 from .brawl_api import normalize_tag
-from .tournament import pair_round
 
 
 SCHEMA = """
@@ -45,7 +44,6 @@ CREATE TABLE IF NOT EXISTS events (
     result_channel_id INTEGER NOT NULL,
     queue_message_id INTEGER,
     current_round INTEGER NOT NULL DEFAULT 0,
-    champion_user_id INTEGER,
     created_at TEXT NOT NULL,
     finished_at TEXT
 );
@@ -59,16 +57,6 @@ CREATE TABLE IF NOT EXISTS event_players (
     status TEXT NOT NULL DEFAULT 'queued',
     PRIMARY KEY (event_id, user_id),
     UNIQUE (event_id, seed)
-);
-
-CREATE TABLE IF NOT EXISTS round_entries (
-    event_id INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE,
-    round_no INTEGER NOT NULL,
-    user_id INTEGER NOT NULL,
-    sort_order INTEGER NOT NULL,
-    status TEXT NOT NULL CHECK(status IN ('pending', 'winner', 'loser')),
-    PRIMARY KEY (event_id, round_no, user_id),
-    FOREIGN KEY (event_id, user_id) REFERENCES event_players(event_id, user_id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS matches (
@@ -238,6 +226,25 @@ class Database:
             await self._ensure_protected_registration(
                 int(settings["protected_user_id"]),
                 str(settings["protected_brawl_tag"]),
+            )
+
+        # Do not resume active events created by the old elimination-bracket format.
+        # They lack the protected-target event row and must not produce cross-player matches.
+        legacy_events = await _fetchall(
+            self.conn,
+            "SELECT e.id FROM events e WHERE e.guild_id = ? AND e.status IN ('open', 'active') "
+            "AND NOT EXISTS (SELECT 1 FROM event_players ep WHERE ep.event_id = e.id AND ep.status = 'protected')",
+            (self._guild_id,),
+        )
+        for legacy_event in legacy_events:
+            event_id = int(legacy_event["id"])
+            await self.conn.execute(
+                "UPDATE matches SET status = 'cancelled' WHERE event_id = ? AND status IN ('monitoring', 'pending_ban')",
+                (event_id,),
+            )
+            await self.conn.execute(
+                "UPDATE events SET status = 'cancelled', event_key = NULL, finished_at = ? WHERE id = ?",
+                (_utc_now(), event_id),
             )
         await self.conn.commit()
 
@@ -601,6 +608,7 @@ class Database:
         queue_channel_id: int,
         result_channel_id: int,
     ) -> int:
+        """Create a queue with the fixed protected player stored as the opponent, not an entrant."""
         conn = self._db()
         await conn.execute("BEGIN IMMEDIATE")
         try:
@@ -611,12 +619,33 @@ class Database:
             )
             if active:
                 raise ValueError("이미 참가 모집 중이거나 진행 중인 이벤트가 있습니다.")
+            protected = await _fetchone(
+                conn,
+                "SELECT protected_user_id, protected_brawl_tag FROM guild_settings WHERE guild_id = ?",
+                (self._guild_id,),
+            )
+            if not protected or protected["protected_user_id"] is None or not protected["protected_brawl_tag"]:
+                raise ValueError("보호 Discord 계정과 고정 Brawl 태그를 먼저 설정해 주세요.")
+            protected_user_id = int(protected["protected_user_id"])
+            protected_tag = str(protected["protected_brawl_tag"])
+            protected_registration = await _fetchone(
+                conn,
+                "SELECT player_name FROM registrations WHERE guild_id = ? AND user_id = ? AND player_tag = ?",
+                (self._guild_id, protected_user_id, protected_tag),
+            )
+            if not protected_registration:
+                raise ValueError("고정 보호 계정의 Brawl 태그 등록을 찾지 못했습니다. /set_protected를 다시 실행해 주세요.")
             cursor = await conn.execute(
                 "INSERT INTO events(guild_id, event_key, event_date, status, queue_channel_id, result_channel_id, created_at) "
                 "VALUES (?, ?, ?, 'open', ?, ?, ?)",
                 (self._guild_id, event_key, event_date, queue_channel_id, result_channel_id, _utc_now()),
             )
             event_id = int(cursor.lastrowid)
+            await conn.execute(
+                "INSERT INTO event_players(event_id, user_id, player_tag, player_name, seed, status) "
+                "VALUES (?, ?, ?, ?, 0, 'protected')",
+                (event_id, protected_user_id, protected_tag, protected_registration["player_name"]),
+            )
             await conn.commit()
             return event_id
         except Exception:
@@ -678,12 +707,18 @@ class Database:
                 raise ValueError("먼저 /register로 유효한 브롤 태그를 등록해 주세요.")
             existing = await _fetchone(
                 conn,
-                "SELECT seed FROM event_players WHERE event_id = ? AND user_id = ?",
+                "SELECT seed, status FROM event_players WHERE event_id = ? AND user_id = ?",
                 (event_id, user_id),
             )
+            if existing and existing["status"] == "protected":
+                raise ValueError("보호 대상은 대기열에 들어가지 않습니다. 등록한 10명과 순서대로 경기합니다.")
             if existing:
                 raise ValueError(f"이미 오늘 이벤트에 참가했습니다. 순번: {existing['seed']}번")
-            count_row = await _fetchone(conn, "SELECT COUNT(*) AS count FROM event_players WHERE event_id = ?", (event_id,))
+            count_row = await _fetchone(
+                conn,
+                "SELECT COUNT(*) AS count FROM event_players WHERE event_id = ? AND status != 'protected'",
+                (event_id,),
+            )
             count = int(count_row["count"] if count_row else 0)
             if count >= capacity:
                 raise ValueError("오늘 참가 정원 10명이 이미 찼습니다.")
@@ -695,21 +730,21 @@ class Database:
             )
             count += 1
             started = count == capacity
+            first_match_id: int | None = None
             if started:
-                entrants = await _fetchall(
-                    conn,
-                    "SELECT user_id FROM event_players WHERE event_id = ? ORDER BY seed",
+                await conn.execute(
+                    "UPDATE event_players SET status = 'active' WHERE event_id = ? AND status = 'queued'",
                     (event_id,),
                 )
-                entrant_ids = [int(row["user_id"]) for row in entrants]
-                await conn.execute("UPDATE event_players SET status = 'active' WHERE event_id = ?", (event_id,))
                 await conn.execute(
                     "UPDATE events SET status = 'active', current_round = 1 WHERE id = ?",
                     (event_id,),
                 )
-                await self._create_round_tx(conn, event_id, 1, entrant_ids)
+                first_match_id = await self._create_challenge_tx(conn, event_id, 1)
+                if first_match_id is None:
+                    raise RuntimeError("Could not create the first protected-player challenge")
             await conn.commit()
-            return {"seed": seed, "count": count, "started": started}
+            return {"seed": seed, "count": count, "started": started, "match_id": first_match_id}
         except Exception:
             await conn.rollback()
             raise
@@ -729,26 +764,28 @@ class Database:
             event_id = int(event["id"])
             participant = await _fetchone(
                 conn,
-                "SELECT seed FROM event_players WHERE event_id = ? AND user_id = ?",
+                "SELECT seed, status FROM event_players WHERE event_id = ? AND user_id = ?",
                 (event_id, user_id),
             )
-            if not participant:
+            if not participant or participant["status"] != "queued":
                 raise ValueError("현재 대기열에 참가 신청되어 있지 않습니다.")
             await conn.execute(
-                "DELETE FROM event_players WHERE event_id = ? AND user_id = ?",
+                "DELETE FROM event_players WHERE event_id = ? AND user_id = ? AND status = 'queued'",
                 (event_id, user_id),
             )
-            # Move all seeds out of the positive range first to avoid the UNIQUE
-            # constraint while resequencing the remaining users.
-            await conn.execute("UPDATE event_players SET seed = -seed WHERE event_id = ?", (event_id,))
+            # Resequence only challengers; the protected target keeps seed 0.
+            await conn.execute(
+                "UPDATE event_players SET seed = -seed WHERE event_id = ? AND status = 'queued'",
+                (event_id,),
+            )
             remaining = await _fetchall(
                 conn,
-                "SELECT user_id FROM event_players WHERE event_id = ? ORDER BY seed DESC",
+                "SELECT user_id FROM event_players WHERE event_id = ? AND status = 'queued' ORDER BY seed DESC",
                 (event_id,),
             )
             for seed, row in enumerate(remaining, start=1):
                 await conn.execute(
-                    "UPDATE event_players SET seed = ?, status = 'queued' WHERE event_id = ? AND user_id = ?",
+                    "UPDATE event_players SET seed = ? WHERE event_id = ? AND user_id = ?",
                     (seed, event_id, row["user_id"]),
                 )
             await conn.commit()
@@ -757,43 +794,46 @@ class Database:
             await conn.rollback()
             raise
 
-    async def _create_round_tx(
+    async def _create_challenge_tx(
         self,
         conn: aiosqlite.Connection,
         event_id: int,
-        round_no: int,
-        entrant_ids: list[int],
+        challenger_seed: int,
     ) -> int | None:
-        now = _utc_now()
-        for order, user_id in enumerate(entrant_ids, start=1):
-            await conn.execute(
-                "INSERT INTO round_entries(event_id, round_no, user_id, sort_order, status) "
-                "VALUES (?, ?, ?, ?, 'pending')",
-                (event_id, round_no, user_id, order),
-            )
-        pairs, bye_user_id = pair_round(entrant_ids)
-        for slot_no, (player1_id, player2_id) in enumerate(pairs, start=1):
-            await conn.execute(
-                "INSERT INTO matches(event_id, round_no, slot_no, player1_user_id, player2_user_id, started_at, status) "
-                "VALUES (?, ?, ?, ?, ?, ?, 'monitoring')",
-                (event_id, round_no, slot_no, player1_id, player2_id, now),
-            )
-        if bye_user_id is not None:
-            await conn.execute(
-                "UPDATE round_entries SET status = 'winner' WHERE event_id = ? AND round_no = ? AND user_id = ?",
-                (event_id, round_no, bye_user_id),
-            )
-        await conn.execute("UPDATE events SET current_round = ? WHERE id = ?", (round_no, event_id))
-        return bye_user_id
+        target = await _fetchone(
+            conn,
+            "SELECT user_id FROM event_players WHERE event_id = ? AND status = 'protected' LIMIT 1",
+            (event_id,),
+        )
+        challenger = await _fetchone(
+            conn,
+            "SELECT user_id, seed FROM event_players WHERE event_id = ? AND status = 'active' AND seed = ?",
+            (event_id, challenger_seed),
+        )
+        if not target or not challenger:
+            return None
+        cursor = await conn.execute(
+            "INSERT INTO matches(event_id, round_no, slot_no, player1_user_id, player2_user_id, started_at, status) "
+            "VALUES (?, 1, ?, ?, ?, ?, 'monitoring')",
+            (
+                event_id,
+                int(challenger["seed"]),
+                int(target["user_id"]),
+                int(challenger["user_id"]),
+                _utc_now(),
+            ),
+        )
+        await conn.execute("UPDATE events SET current_round = ? WHERE id = ?", (challenger_seed, event_id))
+        return int(cursor.lastrowid)
 
     async def get_event_players(self, event_id: int) -> list[dict[str, Any]]:
         return await _fetchall(
             self._db(),
-            "SELECT * FROM event_players WHERE event_id = ? ORDER BY seed",
+            "SELECT * FROM event_players WHERE event_id = ? AND status != 'protected' ORDER BY seed",
             (event_id,),
         )
 
-    async def get_round_matches(self, event_id: int, round_no: int) -> list[dict[str, Any]]:
+    async def get_round_matches(self, event_id: int, round_no: int = 1) -> list[dict[str, Any]]:
         return await _fetchall(
             self._db(),
             "SELECT m.*, p1.player_tag AS tag1, p1.player_name AS name1, "
@@ -802,19 +842,6 @@ class Database:
             "JOIN event_players p1 ON p1.event_id = m.event_id AND p1.user_id = m.player1_user_id "
             "JOIN event_players p2 ON p2.event_id = m.event_id AND p2.user_id = m.player2_user_id "
             "WHERE m.event_id = ? AND m.round_no = ? ORDER BY m.slot_no",
-            (event_id, round_no),
-        )
-
-    async def get_round_byes(self, event_id: int, round_no: int) -> list[dict[str, Any]]:
-        return await _fetchall(
-            self._db(),
-            "SELECT re.user_id, ep.player_name, ep.player_tag "
-            "FROM round_entries re JOIN event_players ep "
-            "ON ep.event_id = re.event_id AND ep.user_id = re.user_id "
-            "WHERE re.event_id = ? AND re.round_no = ? AND re.status = 'winner' "
-            "AND NOT EXISTS (SELECT 1 FROM matches m WHERE m.event_id = re.event_id "
-            "AND m.round_no = re.round_no AND (m.player1_user_id = re.user_id OR m.player2_user_id = re.user_id)) "
-            "ORDER BY re.sort_order",
             (event_id, round_no),
         )
 
@@ -894,10 +921,14 @@ class Database:
         conn = self._db()
         await conn.execute("BEGIN IMMEDIATE")
         try:
-            row = await _fetchone(conn, "SELECT status FROM matches WHERE id = ?", (match_id,))
+            row = await _fetchone(conn, "SELECT * FROM matches WHERE id = ?", (match_id,))
             if not row or row["status"] != "monitoring":
                 await conn.rollback()
                 return False
+            player_ids = {int(row["player1_user_id"]), int(row["player2_user_id"])}
+            if winner_user_id not in player_ids or loser_user_id not in player_ids or winner_user_id == loser_user_id:
+                await conn.rollback()
+                raise ValueError("경기 승자와 패자는 현재 1대1에 등록된 서로 다른 두 플레이어여야 합니다.")
             await conn.execute(
                 "UPDATE matches SET status = 'pending_ban', winner_user_id = ?, loser_user_id = ?, "
                 "battle_key = ?, result_kind = ?, ban_status = 'pending' WHERE id = ?",
@@ -920,7 +951,7 @@ class Database:
         protected_win_qualification: bool = False,
         failure_reason: str | None = None,
     ) -> dict[str, Any] | None:
-        """Commit a resolved match and advance the bracket exactly once."""
+        """Finalize the current fixed-target duel, then queue the next challenger."""
         conn = self._db()
         await conn.execute("BEGIN IMMEDIATE")
         try:
@@ -933,7 +964,21 @@ class Database:
                 await conn.rollback()
                 return None
 
-            loser_status = "protected_eliminated" if protected_loser else "eliminated"
+            target = await _fetchone(
+                conn,
+                "SELECT user_id FROM event_players WHERE event_id = ? AND status = 'protected' LIMIT 1",
+                (match["event_id"],),
+            )
+            if not target:
+                raise RuntimeError("Active sequential event is missing its protected target")
+            protected_id = int(target["user_id"])
+            player_ids = {int(match["player1_user_id"]), int(match["player2_user_id"])}
+            if protected_id not in player_ids:
+                raise RuntimeError("Current match does not include the configured protected target")
+            challenger_id = next(user_id for user_id in player_ids if user_id != protected_id)
+            if int(match["winner_user_id"]) not in player_ids or int(match["loser_user_id"]) not in player_ids:
+                raise RuntimeError("Resolved winner/loser do not belong to the current match")
+
             loser_player = await _fetchone(
                 conn,
                 "SELECT player_tag FROM event_players WHERE event_id = ? AND user_id = ?",
@@ -942,7 +987,8 @@ class Database:
             winner_qualified = bool(
                 protected_win_qualification
                 and protected_loser
-                and protected_user_id is not None
+                and int(match["loser_user_id"]) == protected_id
+                and protected_user_id == protected_id
                 and protected_brawl_tag is not None
                 and loser_player is not None
                 and str(loser_player["player_tag"]) == protected_brawl_tag
@@ -951,21 +997,10 @@ class Database:
                 "UPDATE matches SET status = 'completed', ban_status = ?, failure_reason = ?, winner_qualified = ? WHERE id = ?",
                 (ban_status, failure_reason, int(winner_qualified), match_id),
             )
+            challenger_status = "challenger_won" if int(match["winner_user_id"]) == challenger_id else "challenger_lost"
             await conn.execute(
-                "UPDATE round_entries SET status = 'winner' WHERE event_id = ? AND round_no = ? AND user_id = ?",
-                (match["event_id"], match["round_no"], match["winner_user_id"]),
-            )
-            await conn.execute(
-                "UPDATE round_entries SET status = 'loser' WHERE event_id = ? AND round_no = ? AND user_id = ?",
-                (match["event_id"], match["round_no"], match["loser_user_id"]),
-            )
-            await conn.execute(
-                "UPDATE event_players SET status = 'active' WHERE event_id = ? AND user_id = ?",
-                (match["event_id"], match["winner_user_id"]),
-            )
-            await conn.execute(
-                "UPDATE event_players SET status = ? WHERE event_id = ? AND user_id = ?",
-                (loser_status, match["event_id"], match["loser_user_id"]),
+                "UPDATE event_players SET status = ? WHERE event_id = ? AND user_id = ? AND status = 'active'",
+                (challenger_status, match["event_id"], challenger_id),
             )
             if winner_qualified:
                 await conn.execute(
@@ -989,62 +1024,37 @@ class Database:
                     ),
                 )
 
-            progression = await self._advance_event_tx(conn, int(match["event_id"]), int(match["round_no"]))
+            progression = await self._advance_event_tx(conn, int(match["event_id"]))
             await conn.commit()
             return progression
         except Exception:
             await conn.rollback()
             raise
 
-    async def _advance_event_tx(self, conn: aiosqlite.Connection, event_id: int, round_no: int) -> dict[str, Any] | None:
-        pending_match = await _fetchone(
+    async def _advance_event_tx(self, conn: aiosqlite.Connection, event_id: int) -> dict[str, Any]:
+        next_challenger = await _fetchone(
             conn,
-            "SELECT COUNT(*) AS count FROM matches WHERE event_id = ? AND round_no = ? "
-            "AND status NOT IN ('completed', 'cancelled')",
-            (event_id, round_no),
+            "SELECT seed FROM event_players WHERE event_id = ? AND status = 'active' ORDER BY seed LIMIT 1",
+            (event_id,),
         )
-        pending_entry = await _fetchone(
-            conn,
-            "SELECT COUNT(*) AS count FROM round_entries WHERE event_id = ? AND round_no = ? AND status = 'pending'",
-            (event_id, round_no),
-        )
-        if int(pending_match["count"] if pending_match else 0) > 0:
-            return None
-        if int(pending_entry["count"] if pending_entry else 0) > 0:
-            return None
+        if next_challenger:
+            challenge_no = int(next_challenger["seed"])
+            match_id = await self._create_challenge_tx(conn, event_id, challenge_no)
+            if match_id is None:
+                raise RuntimeError(f"Could not create sequential challenge {challenge_no} for event {event_id}")
+            return {"next_challenge_no": challenge_no, "next_match_id": match_id}
 
-        winners = await _fetchall(
+        completed = await _fetchone(
             conn,
-            "SELECT user_id FROM round_entries WHERE event_id = ? AND round_no = ? AND status = 'winner' ORDER BY sort_order",
-            (event_id, round_no),
+            "SELECT COUNT(*) AS count FROM matches WHERE event_id = ? AND status = 'completed'",
+            (event_id,),
         )
-        winner_ids = [int(row["user_id"]) for row in winners]
-        if not winner_ids:
-            await conn.execute(
-                "UPDATE events SET status = 'completed', finished_at = ? WHERE id = ?",
-                (_utc_now(), event_id),
-            )
-            return {"champion_user_id": None}
-        if len(winner_ids) == 1:
-            champion_id = winner_ids[0]
-            await conn.execute(
-                "UPDATE events SET status = 'completed', champion_user_id = ?, finished_at = ? WHERE id = ?",
-                (champion_id, _utc_now(), event_id),
-            )
-            await conn.execute(
-                "UPDATE event_players SET status = 'champion' WHERE event_id = ? AND user_id = ?",
-                (event_id, champion_id),
-            )
-            return {"champion_user_id": champion_id}
-
-        next_round = round_no + 1
-        for user_id in winner_ids:
-            await conn.execute(
-                "UPDATE event_players SET status = 'active' WHERE event_id = ? AND user_id = ?",
-                (event_id, user_id),
-            )
-        bye_user_id = await self._create_round_tx(conn, event_id, next_round, winner_ids)
-        return {"new_round": next_round, "bye_user_id": bye_user_id}
+        completed_count = int(completed["count"] if completed else 0)
+        await conn.execute(
+            "UPDATE events SET status = 'completed', finished_at = ? WHERE id = ?",
+            (_utc_now(), event_id),
+        )
+        return {"event_completed": True, "matches_completed": completed_count}
 
     async def get_active_event_snapshot(self) -> dict[str, Any] | None:
         event = await self.get_active_event()
@@ -1052,10 +1062,8 @@ class Database:
             return None
         event_id = int(event["id"])
         players = await self.get_event_players(event_id)
-        round_no = int(event["current_round"] or 0)
-        matches = await self.get_round_matches(event_id, round_no) if round_no else []
-        byes = await self.get_round_byes(event_id, round_no) if round_no else []
-        return {"event": event, "players": players, "matches": matches, "byes": byes}
+        matches = await self.get_round_matches(event_id, 1) if event["status"] == "active" else []
+        return {"event": event, "players": players, "matches": matches, "byes": []}
 
     async def cancel_event(self, event_id: int) -> None:
         conn = self._db()

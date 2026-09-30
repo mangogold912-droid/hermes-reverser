@@ -20,7 +20,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
-log = logging.getLogger("brawl-elimination-bot")
+log = logging.getLogger("brawl-challenge-bot")
 
 
 async def _send_ephemeral(interaction: discord.Interaction, content: str) -> None:
@@ -91,9 +91,9 @@ class DailyQueueView(discord.ui.View):
             return
 
         if joined["started"]:
-            await _send_ephemeral(interaction, "10명 모집 완료! 순번대로 대진을 만들고 경기를 확인합니다.")
+            await _send_ephemeral(interaction, "10명 모집 완료! 보호 대상과 1번 도전자의 경기를 시작합니다. 이후 도전자도 순번대로 한 명씩 경기합니다.")
             await self.bot.refresh_queue_message(int(event["id"]))
-            await self.bot.announce_round(int(event["id"]), 1)
+            await self.bot.announce_challenge(int(event["id"]), 1)
         else:
             await _send_ephemeral(
                 interaction,
@@ -102,7 +102,7 @@ class DailyQueueView(discord.ui.View):
             await self.bot.refresh_queue_message(int(event["id"]))
 
 
-class BrawlEliminationBot(commands.Bot):
+class BrawlChallengeBot(commands.Bot):
     def __init__(self, settings: Settings) -> None:
         intents = discord.Intents.default()
         # Required to verify entrants to the secondary winners-only server.
@@ -434,7 +434,7 @@ class BrawlEliminationBot(commands.Bot):
                 return
             await _send_ephemeral(interaction, f"이벤트 #{event_id} 참가 버튼을 설정된 모집 채널에 올렸습니다.")
 
-        @app_commands.command(name="event_status", description="오늘 이벤트의 참가자, 대진 및 진행 상태를 확인합니다.")
+        @app_commands.command(name="event_status", description="오늘 대기 순번과 보호 대상 1대1 경기 진행 상태를 확인합니다.")
         async def event_status(interaction: discord.Interaction) -> None:
             snapshot = await self.db.get_active_event_snapshot()
             if not snapshot:
@@ -442,23 +442,24 @@ class BrawlEliminationBot(commands.Bot):
                 return
             event = snapshot["event"]
             players = snapshot["players"]
-            lines = [f"상태: **{event['status']}** · 참가자 **{len(players)}/10**"]
+            lines = [f"상태: **{event['status']}** · 도전자 **{len(players)}/10**"]
             if event["status"] == "open":
                 lines.extend(f"{row['seed']}번 · <@{row['user_id']}> · {row['player_name']}" for row in players)
             else:
-                lines.append(f"현재 라운드: **{event['current_round']}**")
+                lines.append(f"현재 도전자 순번: **{event['current_round']}/10**")
+                lines.append("참가 순서: " + " · ".join(f"{row['seed']}. <@{row['user_id']}>" for row in players))
                 for match in snapshot["matches"]:
-                    label = f"R{match['round_no']}-M{match['slot_no']}"
                     state = match["status"]
                     if state == "completed":
                         state = f"완료 ({match['ban_status'] or '결과 저장'})"
+                        if match["winner_qualified"]:
+                            state += " · 보호 대상 패배, 보조 서버 자격"
                     else:
-                        state = "경기 기록 확인 중" if state == "monitoring" else "밴 처리 중"
+                        state = "경기 기록 확인 중" if state == "monitoring" else "승패 확인 · 밴 처리 중"
                     lines.append(
-                        f"**{label}** · <@{match['player1_user_id']}> vs <@{match['player2_user_id']}> · {state}"
+                        f"**도전자 {match['slot_no']}번** · <@{match['player1_user_id']}> vs "
+                        f"<@{match['player2_user_id']}> · {state}"
                     )
-                for bye in snapshot["byes"]:
-                    lines.append(f"부전승 · <@{bye['user_id']}> ({bye['player_name']})")
             text = "\n".join(lines)
             await _send_ephemeral(interaction, text[:1900])
 
@@ -480,8 +481,8 @@ class BrawlEliminationBot(commands.Bot):
             await self.refresh_queue_message(int(event["id"]))
             await _send_ephemeral(interaction, f"이벤트 #{event['id']}을 취소했습니다. 자동 밴은 실행되지 않았습니다.")
 
-        @app_commands.command(name="resolve_match", description="API로 판정되지 않은 현재 경기의 승자를 관리자가 직접 확정합니다.")
-        @app_commands.describe(slot="/event_status에 표시된 현재 라운드 경기 번호(M)", winner="승자로 확정할 두 참가자 중 한 명")
+        @app_commands.command(name="resolve_match", description="API로 판정되지 않은 현재 도전자 경기의 승자를 관리자가 직접 확정합니다.")
+        @app_commands.describe(slot="/event_status에 표시된 현재 도전자 순번", winner="승자로 확정할 보호 대상 또는 현재 도전자")
         @app_commands.default_permissions(administrator=True)
         async def resolve_match(interaction: discord.Interaction, slot: app_commands.Range[int, 1, 10], winner: discord.Member) -> None:
             if not _is_admin(interaction):
@@ -491,9 +492,12 @@ class BrawlEliminationBot(commands.Bot):
             if not event or event["status"] != "active":
                 await _send_ephemeral(interaction, "진행 중인 대회가 없습니다.")
                 return
-            match = await self.db.get_match_by_slot(int(event["id"]), int(event["current_round"]), int(slot))
+            if int(slot) != int(event["current_round"]):
+                await _send_ephemeral(interaction, f"현재 판정 가능한 도전자는 {event['current_round']}번입니다.")
+                return
+            match = await self.db.get_match_by_slot(int(event["id"]), 1, int(slot))
             if not match or match["status"] != "monitoring":
-                await _send_ephemeral(interaction, "해당 번호의 판정 대기 경기를 찾지 못했습니다.")
+                await _send_ephemeral(interaction, "해당 도전자의 판정 대기 경기를 찾지 못했습니다.")
                 return
             if winner.id not in {int(match["player1_user_id"]), int(match["player2_user_id"])}:
                 await _send_ephemeral(interaction, "승자는 해당 경기의 두 참가자 중 한 명이어야 합니다.")
@@ -512,7 +516,7 @@ class BrawlEliminationBot(commands.Bot):
             await self.process_pending_match(int(match["id"]))
             await _send_ephemeral(
                 interaction,
-                f"관리자 판정으로 R{match['round_no']}-M{match['slot_no']} 승자를 {winner.mention}로 확정했습니다. "
+                f"관리자 판정으로 {match['slot_no']}번 도전자 경기 승자를 {winner.mention}로 확정했습니다. "
                 f"DRY_RUN={str(self.settings.dry_run).lower()} 설정이 밴 실행 여부를 결정합니다.",
             )
 
@@ -676,11 +680,11 @@ class BrawlEliminationBot(commands.Bot):
         try:
             channel = await self._fetch_channel(self.settings.queue_channel_id)
             embed = discord.Embed(
-                title="오늘의 브롤스타즈 탈락전 참가 모집",
+                title="보호 대상 1대1 챌린지 — 도전자 모집",
                 description=(
                     "브롤 태그를 등록하고 **오늘 참가하기**를 눌러 주세요.\n"
-                    "10명이 모이면 순번을 확정하고, 순번대로 바운티 모드 1대1 대진을 시작합니다.\n"
-                    "무승부·불명확한 기록은 밴하지 않습니다."
+                    "도전자 10명이 모이면 보호 대상이 1번부터 10번까지 순서대로 각각 별도의 바운티 1대1 경기를 합니다.\n"
+                    "도전자끼리는 경기하지 않습니다. 무승부·불명확한 기록은 밴하지 않습니다."
                 ),
                 color=discord.Color.gold(),
                 timestamp=datetime.now(timezone.utc),
@@ -716,15 +720,15 @@ class BrawlEliminationBot(commands.Bot):
         players = await self.db.get_event_players(event_id)
         state = event["status"]
         if state == "open":
-            title = "오늘의 브롤스타즈 탈락전 참가 모집"
-            description = "브롤 태그를 등록하고 버튼을 눌러 참가하세요. 10명이 모이면 자동으로 대진을 시작합니다."
+            title = "보호 대상 1대1 챌린지 — 도전자 모집"
+            description = "브롤 태그를 등록하고 버튼을 눌러 참가하세요. 10명이 모이면 보호 대상과 순번대로 각각 별도의 바운티 1대1 경기를 합니다."
             view = DailyQueueView(self)
             for child in view.children:
                 if isinstance(child, discord.ui.Button):
                     child.disabled = False
         elif state == "active":
-            title = "참가 마감 — 대진 진행 중"
-            description = f"10명 모집이 완료되어 현재 **{event['current_round']}라운드**를 진행 중입니다."
+            title = "참가 마감 — 순차 1대1 진행 중"
+            description = f"보호 대상이 **{event['current_round']}번 도전자**와 경기 중입니다. 결과 처리 후 다음 순번으로 진행합니다."
             view = DailyQueueView(self)
             for child in view.children:
                 if isinstance(child, discord.ui.Button):
@@ -746,27 +750,26 @@ class BrawlEliminationBot(commands.Bot):
         embed.add_field(name="순번", value=roster[:1024], inline=False)
         await message.edit(embed=embed, view=view)
 
-    async def announce_round(self, event_id: int, round_no: int) -> None:
+    async def announce_challenge(self, event_id: int, challenge_no: int) -> None:
         event = await self.db.get_event(event_id)
         if not event:
             return
-        matches = await self.db.get_round_matches(event_id, round_no)
-        byes = await self.db.get_round_byes(event_id, round_no)
-        lines = [
-            f"**R{row['round_no']}-M{row['slot_no']}** · <@{row['player1_user_id']}> ({row['name1']} / {row['tag1']}) "
-            f"vs <@{row['player2_user_id']}> ({row['name2']} / {row['tag2']})"
-            for row in matches
-        ]
-        lines.extend(f"**부전승** · <@{row['user_id']}> ({row['player_name']})" for row in byes)
-        if not lines:
+        match = await self.db.get_match_by_slot(event_id, 1, challenge_no)
+        if not match or match["status"] != "monitoring":
             return
-        mode_text = "시험 모드: 밴 없이 대진만 진행" if self.settings.dry_run else "패자는 경기 결과가 확인되면 영구 밴됩니다."
+        description = (
+            f"**도전자 {challenge_no}/10**\n"
+            f"보호 대상 <@{match['player1_user_id']}> ({match['name1']} / {match['tag1']}) "
+            f"vs 도전자 <@{match['player2_user_id']}> ({match['name2']} / {match['tag2']})\n\n"
+            "이번 경기가 확정된 뒤에만 다음 순번의 경기를 시작합니다."
+        )
+        mode_text = "시험 모드: 밴 없이 결과만 기록" if self.settings.dry_run else "보호 대상에게 진 도전자는 결과 확인 후 영구 밴됩니다."
         embed = discord.Embed(
-            title=f"브롤스타즈 대진 — {round_no}라운드",
-            description="\n".join(lines)[:4000],
+            title=f"바운티 1대1 — {challenge_no}번 도전자",
+            description=description,
             color=discord.Color.blurple(),
         )
-        embed.set_footer(text=f"감지 모드: {', '.join(self.settings.allowed_modes)} · {mode_text}")
+        embed.set_footer(text=f"모드: Bounty only · 감지: {', '.join(self.settings.allowed_modes)} · {mode_text}")
         await self._send_to_channel(int(event["result_channel_id"]), embed=embed)
 
     async def _send_to_channel(self, channel_id: int, *, content: str | None = None, embed: discord.Embed | None = None) -> None:
@@ -922,8 +925,8 @@ class BrawlEliminationBot(commands.Bot):
         await self._send_to_channel(
             int(match["result_channel_id"]),
             content=(
-                f"R{match['round_no']}-M{match['slot_no']} 경기에서 무승부가 확인됐습니다. "
-                "아무도 밴하지 않았습니다. 두 참가자는 재경기해 주세요. "
+                f"{match['slot_no']}번 도전자 경기에서 무승부가 확인됐습니다. "
+                "아무도 밴하지 않았으며, 결과가 확정될 때까지 다음 도전자 경기는 시작하지 않습니다. 재경기해 주세요. "
                 f"(모드: {decision.mode}, 맵: {decision.map_name or '정보 없음'})"
             ),
         )
@@ -1070,14 +1073,13 @@ class BrawlEliminationBot(commands.Bot):
                     ban_status = "banned"
                 except discord.NotFound:
                     reason = (
-                        f"Brawl Stars elimination: R{match['round_no']}-M{match['slot_no']}; "
+                        f"Brawl Stars protected-target challenge #{match['slot_no']}; "
                         f"winner Discord ID {winner_id}; result {match['result_kind']}"
                     )
                     await guild.ban(target, reason=reason[:480], delete_message_seconds=0)
                     ban_status = "banned"
             except discord.Forbidden:
-                # Keep the decisive result pending. Once permissions or role order are fixed,
-                # the poller retries and advances the bracket only after the ban succeeds.
+                # Keep this challenge pending until the required permanent ban succeeds.
                 log.error("Cannot ban loser %s; check BAN_MEMBERS and bot role hierarchy", loser_id)
                 return
             except discord.HTTPException as exc:
@@ -1100,7 +1102,6 @@ class BrawlEliminationBot(commands.Bot):
         if protected_win_qualification and protected_id is not None:
             await self.send_winner_invite(winner_id, protected_id)
         if progression is None:
-            # None also means the round still has other matches in progress.
             completed = await self.db.get_match(match_id)
             if completed and completed["status"] == "completed":
                 await self._announce_match_result(completed, decision)
@@ -1109,12 +1110,15 @@ class BrawlEliminationBot(commands.Bot):
         completed = await self.db.get_match(match_id)
         if completed:
             await self._announce_match_result(completed, decision)
-        if "new_round" in progression:
-            await self.announce_round(int(match["event_id"]), int(progression["new_round"]))
-        elif progression.get("champion_user_id"):
+        if "next_challenge_no" in progression:
+            await self.announce_challenge(int(match["event_id"]), int(progression["next_challenge_no"]))
+        elif progression.get("event_completed"):
             await self._send_to_channel(
                 int(match["result_channel_id"]),
-                content=f"🏆 오늘의 우승자: <@{progression['champion_user_id']}> — 대회가 종료됐습니다.",
+                content=(
+                    "✅ 보호 대상과 10명의 도전자 간 순차 1대1 경기가 모두 끝났습니다. "
+                    "도전자끼리의 경기는 없으며, 보호 대상에게 이긴 도전자만 보조 서버 자격을 받습니다."
+                ),
             )
         await self.refresh_queue_message(int(match["event_id"]))
 
@@ -1129,7 +1133,7 @@ class BrawlEliminationBot(commands.Bot):
                 invite_note = "승자에게 보조 서버 1회용 초대를 보냅니다." if self.settings.winner_guild_id else "WINNER_GUILD_ID가 없어 보조 서버 초대는 설정 후 재전송할 수 있습니다."
             else:
                 invite_note = "고정 보호 브롤 태그와 경기 기록이 일치하지 않아 승자 자격은 부여하지 않았습니다."
-            action = f"<@{loser_id}>은 보호 대상이므로 밴하지 않았습니다. (대진에서는 탈락) {invite_note}"
+            action = f"<@{loser_id}>은 보호 대상이므로 밴하지 않았습니다. 이 도전자의 결과만 기록하고 다음 순번으로 진행합니다. {invite_note}"
         elif status == "dry_run":
             action = f"시험 모드: <@{loser_id}>을(를) 밴할 상황이지만 실제 밴은 하지 않았습니다."
         elif status == "failed":
@@ -1142,7 +1146,7 @@ class BrawlEliminationBot(commands.Bot):
         await self._send_to_channel(
             int(match["result_channel_id"]),
             content=(
-                f"R{match['round_no']}-M{match['slot_no']} 결과 확정: 승자 <@{winner_id}>. "
+                f"{match['slot_no']}번 도전자 경기 결과 확정: 승자 <@{winner_id}>. "
                 f"{action}{suffix}"
             ),
         )
@@ -1152,7 +1156,7 @@ def main() -> None:
         settings = load_settings()
     except Exception as exc:
         raise SystemExit(f"Configuration error: {exc}") from exc
-    bot = BrawlEliminationBot(settings)
+    bot = BrawlChallengeBot(settings)
     bot.run(settings.discord_token, log_handler=None)
 
 

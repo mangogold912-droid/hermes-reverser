@@ -6,6 +6,8 @@ from pathlib import Path
 from brawl_bot.database import Database
 
 
+PROTECTED_TAG = "#8L0Q2YJ"
+
 TAGS = [
     "#2YJPJ2Q0",
     "#8QJ0L0YQ",
@@ -20,12 +22,12 @@ TAGS = [
 ]
 
 
-class DatabaseTournamentTests(unittest.IsolatedAsyncioTestCase):
+class DatabaseSequentialChallengeTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.db = Database(Path(self.temp_dir.name) / "test.sqlite3")
         self.db.bind_guild(123456789)
-        await self.db.open(default_protected_user_id=999)
+        await self.db.open(default_protected_user_id=999, default_protected_brawl_tag=PROTECTED_TAG)
 
     async def asyncTearDown(self):
         await self.db.close()
@@ -45,68 +47,101 @@ class DatabaseTournamentTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["started"])
         return event_id
 
-    async def test_queue_fills_ten_slots_and_starts_first_round(self):
+    async def test_queue_fills_ten_slots_and_starts_only_the_first_challenge(self):
         event_id = await self.create_full_event()
         event = await self.db.get_event(event_id)
+        players = await self.db.get_event_players(event_id)
         matches = await self.db.get_round_matches(event_id, 1)
+        active_matches = await self.db.get_active_matches()
         self.assertEqual(event["status"], "active")
         self.assertEqual(event["current_round"], 1)
-        self.assertEqual(len(matches), 5)
-        self.assertEqual((matches[0]["player1_user_id"], matches[0]["player2_user_id"]), (1, 2))
+        self.assertEqual(len(players), 10)
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(len(active_matches), 1)
+        self.assertEqual((matches[0]["player1_user_id"], matches[0]["player2_user_id"]), (999, 1))
+        self.assertEqual(matches[0]["slot_no"], 1)
 
-    async def test_bracket_advances_and_finishes_after_nine_matches(self):
+    async def test_protected_target_is_not_counted_as_a_queue_entrant(self):
+        event_id = await self.db.create_event(
+            event_key="target-not-entrant",
+            event_date="2026-09-30",
+            queue_channel_id=1,
+            result_channel_id=1,
+        )
+        with self.assertRaisesRegex(ValueError, "보호 대상은 대기열"):
+            await self.db.join_queue(event_id, 999, 10)
+        self.assertEqual(await self.db.get_event_players(event_id), [])
+
+    async def test_all_ten_challengers_face_protected_target_sequentially(self):
         event_id = await self.create_full_event()
-        resolved = 0
-        for round_no in range(1, 5):
-            matches = await self.db.get_round_matches(event_id, round_no)
-            for match in matches:
-                accepted = await self.db.mark_pending_ban(
-                    match["id"],
-                    winner_user_id=match["player1_user_id"],
-                    loser_user_id=match["player2_user_id"],
-                    battle_key_value=f"test-{match['id']}",
-                    result_kind="test",
-                )
-                self.assertTrue(accepted)
-                await self.db.complete_pending_match(
-                    match["id"],
-                    ban_status="dry_run",
-                    protected_loser=False,
-                )
-                resolved += 1
+        progression = None
+        for challenge_no, challenger_id in enumerate(range(1, 11), start=1):
+            active_matches = await self.db.get_active_matches()
+            self.assertEqual(len(active_matches), 1, "only the current challenger may have an active match")
+            match = active_matches[0]
+            self.assertEqual(match["slot_no"], challenge_no)
+            self.assertEqual(match["player1_user_id"], 999)
+            self.assertEqual(match["player2_user_id"], challenger_id)
+            self.assertEqual(match["round_no"], 1)
+            accepted = await self.db.mark_pending_ban(
+                match["id"],
+                winner_user_id=999,
+                loser_user_id=challenger_id,
+                battle_key_value=f"test-{match['id']}",
+                result_kind="test",
+            )
+            self.assertTrue(accepted)
+            progression = await self.db.complete_pending_match(
+                match["id"],
+                ban_status="dry_run",
+                protected_loser=False,
+                protected_user_id=999,
+                protected_brawl_tag=PROTECTED_TAG,
+            )
+            if challenge_no < 10:
+                self.assertEqual(progression["next_challenge_no"], challenge_no + 1)
+                event = await self.db.get_event(event_id)
+                self.assertEqual(event["current_round"], challenge_no + 1)
+            else:
+                self.assertTrue(progression["event_completed"])
+                self.assertEqual(progression["matches_completed"], 10)
+
         event = await self.db.get_event(event_id)
-        self.assertEqual(resolved, 9)
-        self.assertEqual(event["status"], "completed")
-        self.assertIsNotNone(event["champion_user_id"])
-
-    async def test_protected_loser_qualifies_match_winner_for_second_server(self):
-        await self.db.set_protected_account(10, TAGS[9], "Player 10")
-        event_id = await self.create_full_event()
         matches = await self.db.get_round_matches(event_id, 1)
-        protected_match = matches[-1]
-        self.assertEqual(protected_match["player2_user_id"], 10)
+        self.assertEqual(event["status"], "completed")
+        self.assertEqual(len(matches), 10)
+        self.assertEqual([row["slot_no"] for row in matches], list(range(1, 11)))
+        self.assertEqual([row["player2_user_id"] for row in matches], list(range(1, 11)))
+        self.assertTrue(all(row["player1_user_id"] == 999 for row in matches))
+
+    async def test_protected_loser_qualifies_challenger_for_second_server(self):
+        event_id = await self.create_full_event()
+        match = (await self.db.get_active_matches())[0]
+        self.assertEqual((match["player1_user_id"], match["player2_user_id"]), (999, 1))
         self.assertTrue(
             await self.db.mark_pending_ban(
-                protected_match["id"],
-                winner_user_id=9,
-                loser_user_id=10,
+                match["id"],
+                winner_user_id=1,
+                loser_user_id=999,
                 battle_key_value="test-protected-win",
                 result_kind="api",
             )
         )
-        await self.db.complete_pending_match(
-            protected_match["id"],
+        progression = await self.db.complete_pending_match(
+            match["id"],
             ban_status="protected",
             protected_loser=True,
-            protected_user_id=10,
-            protected_brawl_tag=TAGS[9],
+            protected_user_id=999,
+            protected_brawl_tag=PROTECTED_TAG,
             protected_win_qualification=True,
         )
-        self.assertTrue(await self.db.is_qualified_winner(9, 10))
-        self.assertFalse(await self.db.is_qualified_winner(10, 10))
-        record = await self.db.get_qualified_winner(9, 10)
+        self.assertEqual(progression["next_challenge_no"], 2)
+        self.assertTrue(await self.db.is_qualified_winner(1, 999))
+        self.assertFalse(await self.db.is_qualified_winner(999, 999))
+        record = await self.db.get_qualified_winner(1, 999)
         self.assertEqual(record["invite_status"], "pending")
-        self.assertEqual(record["protected_brawl_tag"], TAGS[9])
+        self.assertEqual(record["protected_brawl_tag"], PROTECTED_TAG)
+
 
     async def test_fixed_protected_account_cannot_self_register_a_different_tag(self):
         await self.db.set_protected_account(10, TAGS[9], "Player 10")
@@ -114,24 +149,24 @@ class DatabaseTournamentTests(unittest.IsolatedAsyncioTestCase):
             await self.db.register_tag(10, TAGS[8], "Impostor tag")
 
     async def test_protected_identity_without_fixed_tag_match_does_not_qualify_winner(self):
-        await self.db.set_protected_account(10, TAGS[9], "Player 10")
         event_id = await self.create_full_event()
-        protected_match = (await self.db.get_round_matches(event_id, 1))[-1]
+        match = (await self.db.get_active_matches())[0]
         await self.db.mark_pending_ban(
-            protected_match["id"],
-            winner_user_id=9,
-            loser_user_id=10,
+            match["id"],
+            winner_user_id=1,
+            loser_user_id=999,
             battle_key_value="test-protected-mismatch",
             result_kind="api",
         )
         await self.db.complete_pending_match(
-            protected_match["id"],
+            match["id"],
             ban_status="protected",
             protected_loser=True,
-            protected_user_id=10,
-            protected_win_qualification=False,
+            protected_user_id=999,
+            protected_brawl_tag=TAGS[0],
+            protected_win_qualification=True,
         )
-        self.assertFalse(await self.db.is_qualified_winner(9, 10))
+        self.assertFalse(await self.db.is_qualified_winner(1, 999))
 
     async def test_leaving_open_queue_resequences_remaining_players(self):
         event_id = await self.db.create_event(
@@ -191,6 +226,39 @@ class DatabaseTournamentTests(unittest.IsolatedAsyncioTestCase):
         await self.db.register_tag(1, TAGS[0], "Player 1")
         with self.assertRaises(ValueError):
             await self.db.register_tag(2, TAGS[0], "Player 2")
+
+    async def test_old_active_bracket_event_is_cancelled_on_database_reopen(self):
+        now = "2026-09-30T00:00:00+00:00"
+        cursor = await self.db.conn.execute(
+            "INSERT INTO events(guild_id, event_key, event_date, status, queue_channel_id, result_channel_id, created_at) "
+            "VALUES (?, ?, ?, 'active', ?, ?, ?)",
+            (123456789, "old-bracket", "2026-09-30", 1, 1, now),
+        )
+        event_id = int(cursor.lastrowid)
+        await self.db.conn.executemany(
+            "INSERT INTO event_players(event_id, user_id, player_tag, player_name, seed, status) "
+            "VALUES (?, ?, ?, ?, ?, 'active')",
+            [
+                (event_id, 301, TAGS[0], "Old entrant 1", 1),
+                (event_id, 302, TAGS[1], "Old entrant 2", 2),
+            ],
+        )
+        match_cursor = await self.db.conn.execute(
+            "INSERT INTO matches(event_id, round_no, slot_no, player1_user_id, player2_user_id, started_at, status) "
+            "VALUES (?, 1, 1, 301, 302, ?, 'monitoring')",
+            (event_id, now),
+        )
+        match_id = int(match_cursor.lastrowid)
+        await self.db.conn.commit()
+
+        await self.db.close()
+        await self.db.open()
+        event = await self.db.get_event(event_id)
+        match = await self.db.get_match(match_id)
+        self.assertEqual(event["status"], "cancelled")
+        self.assertIsNone(event["event_key"])
+        self.assertIsNone(await self.db.get_active_event())
+        self.assertEqual(match["status"], "cancelled")
 
     async def test_legacy_database_gets_protected_tag_and_qualification_columns(self):
         legacy_path = Path(self.temp_dir.name) / "legacy.sqlite3"

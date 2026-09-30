@@ -1,1 +1,1 @@
-"""Brawl Stars Discord elimination bot."""
+"""Brawl Stars protected-target sequential challenge bot."""

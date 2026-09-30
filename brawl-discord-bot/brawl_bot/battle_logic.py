@@ -154,7 +154,7 @@ def evaluate_pair_logs(
     """Return the first verifiable shared opponent match after a pairing began.
 
     Both battle-log records must agree on the battle identity and have explicit,
-    opposite results. Draws are returned as a non-elimination decision. Missing,
+    opposite results. Draws are returned as a non-decisive decision. Missing,
     conflicting, same-team, old, or unsupported records are ignored.
     """
     canonical_a = _canonical_tag(tag_a)
