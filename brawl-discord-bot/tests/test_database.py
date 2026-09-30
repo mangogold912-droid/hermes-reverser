@@ -213,6 +213,23 @@ class DatabaseSequentialChallengeTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, "대회 영구 밴"):
             await self.db.join_queue(event_id, 77, 10)
 
+    async def test_server_channels_can_be_set_and_persisted(self):
+        await self.db.set_server_channels(223456789, 323456789)
+        self.assertEqual(await self.db.get_server_channels(), (223456789, 323456789))
+        await self.db.close()
+        await self.db.open()
+        self.assertEqual(await self.db.get_server_channels(), (223456789, 323456789))
+
+    async def test_configure_servers_persists_main_channels_and_winner_destination(self):
+        await self.db.configure_servers(
+            queue_channel_id=223456789,
+            result_channel_id=323456789,
+            winner_guild_id=987654321,
+            invite_channel_id=876543210,
+        )
+        self.assertEqual(await self.db.get_server_channels(), (223456789, 323456789))
+        self.assertEqual(await self.db.get_winner_destination(), (987654321, 876543210))
+
     async def test_winner_destination_can_be_set_and_persisted(self):
         await self.db.set_winner_destination(987654321, 876543210)
         self.assertEqual(await self.db.get_winner_destination(), (987654321, 876543210))
@@ -285,6 +302,8 @@ class DatabaseSequentialChallengeTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("protected_brawl_tag", {row[1] for row in settings_columns})
             self.assertIn("winner_guild_id", {row[1] for row in settings_columns})
             self.assertIn("winner_invite_channel_id", {row[1] for row in settings_columns})
+            self.assertIn("queue_channel_id", {row[1] for row in settings_columns})
+            self.assertIn("result_channel_id", {row[1] for row in settings_columns})
             self.assertIn("winner_qualified", {row[1] for row in match_columns})
             winner_columns = await legacy_db.conn.execute_fetchall("PRAGMA table_info(protected_winners)")
             self.assertIn("protected_brawl_tag", {row[1] for row in winner_columns})

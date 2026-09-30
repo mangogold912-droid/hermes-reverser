@@ -102,7 +102,7 @@ docker compose up --build -d
 - `WINNER_SERVER_STAFF_IDS` (보조 서버에서 자격 검사에서 제외할 운영자 ID, 쉼표 구분)
 - `DRY_RUN=true` (시험 모드), `ALLOWED_MODES=bounty` (다른 모드로 변경 불가)
 
-보조 서버 설정을 비워 두면 경기 결과와 자격은 기록되지만 초대/입장 제한은 실행되지 않습니다. 대신 봇을 양쪽 서버에 초대한 뒤 `/set_winner_server`를 사용하면 재시작 없이 서버와 초대 채널을 저장할 수 있습니다. 기존 `.env` 설정은 DB가 비어 있을 때 기본값으로 복사됩니다.
+보조 서버 설정을 비워 두면 경기 결과와 자격은 기록되지만 초대/입장 제한은 실행되지 않습니다. 봇을 양쪽 서버에 초대한 뒤 관리자 `/configure_servers main_guild_id queue_channel_id result_channel_id winner_guild_id invite_channel_id`를 메인 서버에서 실행하면 서버와 채널 권한을 검증하고 SQLite에 저장합니다. `/set_winner_server`로 보조 서버만 따로 바꿀 수도 있습니다. 개인용 봇 인스턴스는 한 번에 메인 서버 하나를 사용하며, 최초 실행과 슬래시 명령 동기화에는 `.env`의 `DISCORD_GUILD_ID`가 필요합니다. `/configure_servers`의 메인 ID는 현재 서버 및 이 설정과 일치해야 합니다.
 
 ## 명령어
 
@@ -113,11 +113,13 @@ docker compose up --build -d
 | `/leave_queue` | 참가자 | 10명 마감 전 대기열에서 나가기; 남은 번호 재정렬 |
 | `/set_protected member tag` | 관리자 | 멤버 선택으로 보호 Discord 계정과 고정 Brawl 태그 설정; 이벤트 진행 중 변경 불가 |
 | `/set_protected_id user_id tag` | 관리자 | 숫자 Discord ID로 보호 대상 지정; 메인 서버 멤버여야 하며 이벤트 중 변경 불가 |
+| `/configure_servers main_guild_id queue_channel_id result_channel_id winner_guild_id invite_channel_id` | 관리자 | 현재 메인 서버와 보조 서버/채널을 검증해 저장; 명령은 현재 메인 서버에서 실행 |
 | `/open_event` | 관리자 | 정기 시간 외에 모집 즉시 시작 |
 | `/event_status` | 서버 멤버 | 모집 순번, 보호 대상 1대1 경기 및 결과 감지 상태 확인 |
 | `/resolve_match slot winner` | 관리자 | API 판정이 안 된 현재 도전자 경기의 승자 직접 확정 |
 | `/cancel_event` | 관리자 | 진행 중 이벤트 취소; 밴 처리 중에는 취소 불가 |
-| `/set_winner_server guild_id invite_channel_id` | 관리자 | 승자가 갈 보조 서버와 초대 채널 설정; 설정은 SQLite에 저장 |
+| `/configure_servers main_guild_id queue_channel_id result_channel_id winner_guild_id invite_channel_id` | 관리자 | 메인/보조 서버 ID와 채널을 확인해 개인 봇 설정으로 저장 |
+| `/set_winner_server guild_id invite_channel_id` | 관리자 | 보조 서버와 초대 채널만 변경; 설정은 SQLite에 저장 |
 | `/phone_verification_status` | 관리자 | Discord 서버의 전화번호 인증 요구 수준 확인 |
 | `/enable_phone_verification confirm:true` | 관리자 | Discord Verification Level을 Highest로 설정 (서버 전체 적용; 봇에 Manage Server 필요) |
 | `/unban user_id reason` | 관리자 | Discord 밴 및 연결된 Brawl 태그 차단 해제 |

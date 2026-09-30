@@ -17,7 +17,9 @@ CREATE TABLE IF NOT EXISTS guild_settings (
     protected_user_id INTEGER,
     protected_brawl_tag TEXT,
     winner_guild_id INTEGER,
-    winner_invite_channel_id INTEGER
+    winner_invite_channel_id INTEGER,
+    queue_channel_id INTEGER,
+    result_channel_id INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS registrations (
@@ -156,6 +158,10 @@ class Database:
             await self.conn.execute("ALTER TABLE guild_settings ADD COLUMN winner_guild_id INTEGER")
         if not any(row["name"] == "winner_invite_channel_id" for row in settings_columns):
             await self.conn.execute("ALTER TABLE guild_settings ADD COLUMN winner_invite_channel_id INTEGER")
+        if not any(row["name"] == "queue_channel_id" for row in settings_columns):
+            await self.conn.execute("ALTER TABLE guild_settings ADD COLUMN queue_channel_id INTEGER")
+        if not any(row["name"] == "result_channel_id" for row in settings_columns):
+            await self.conn.execute("ALTER TABLE guild_settings ADD COLUMN result_channel_id INTEGER")
         match_columns = await _fetchall(self.conn, "PRAGMA table_info(matches)")
         if not any(row["name"] == "winner_qualified" for row in match_columns):
             await self.conn.execute("ALTER TABLE matches ADD COLUMN winner_qualified INTEGER NOT NULL DEFAULT 0")
@@ -306,6 +312,77 @@ class Database:
             (guild_id or self._guild_id,),
         )
         return str(row["protected_brawl_tag"]) if row and row["protected_brawl_tag"] else None
+
+    async def get_server_channels(self) -> tuple[int, int] | None:
+        row = await _fetchone(
+            self._db(),
+            "SELECT queue_channel_id, result_channel_id FROM guild_settings WHERE guild_id = ?",
+            (self._guild_id,),
+        )
+        if not row or row["queue_channel_id"] is None or row["result_channel_id"] is None:
+            return None
+        return int(row["queue_channel_id"]), int(row["result_channel_id"])
+
+    async def set_server_channels(self, queue_channel_id: int, result_channel_id: int) -> None:
+        if queue_channel_id <= 0 or result_channel_id <= 0:
+            raise ValueError("Discord channel IDs must be positive")
+        await self._db().execute(
+            "INSERT INTO guild_settings(guild_id, queue_channel_id, result_channel_id) VALUES (?, ?, ?) "
+            "ON CONFLICT(guild_id) DO UPDATE SET "
+            "queue_channel_id = excluded.queue_channel_id, result_channel_id = excluded.result_channel_id",
+            (self._guild_id, queue_channel_id, result_channel_id),
+        )
+        await self._db().commit()
+
+    async def configure_servers(
+        self,
+        *,
+        queue_channel_id: int,
+        result_channel_id: int,
+        winner_guild_id: int,
+        invite_channel_id: int,
+    ) -> None:
+        values = (queue_channel_id, result_channel_id, winner_guild_id, invite_channel_id)
+        if any(value <= 0 for value in values):
+            raise ValueError("Discord server/channel IDs must be positive")
+        if winner_guild_id == self._guild_id:
+            raise ValueError("보조 서버는 메인 대회 서버와 달라야 합니다.")
+        conn = self._db()
+        await conn.execute("BEGIN IMMEDIATE")
+        try:
+            current = await _fetchone(
+                conn,
+                "SELECT winner_guild_id, winner_invite_channel_id FROM guild_settings WHERE guild_id = ?",
+                (self._guild_id,),
+            )
+            destination_changed = not current or (
+                current["winner_guild_id"] != winner_guild_id
+                or current["winner_invite_channel_id"] != invite_channel_id
+            )
+            await conn.execute(
+                "INSERT INTO guild_settings "
+                "(guild_id, queue_channel_id, result_channel_id, winner_guild_id, winner_invite_channel_id) "
+                "VALUES (?, ?, ?, ?, ?) ON CONFLICT(guild_id) DO UPDATE SET "
+                "queue_channel_id = excluded.queue_channel_id, result_channel_id = excluded.result_channel_id, "
+                "winner_guild_id = excluded.winner_guild_id, winner_invite_channel_id = excluded.winner_invite_channel_id",
+                (self._guild_id, queue_channel_id, result_channel_id, winner_guild_id, invite_channel_id),
+            )
+            if destination_changed:
+                protected = await _fetchone(
+                    conn,
+                    "SELECT protected_user_id, protected_brawl_tag FROM guild_settings WHERE guild_id = ?",
+                    (self._guild_id,),
+                )
+                if protected and protected["protected_user_id"] is not None and protected["protected_brawl_tag"]:
+                    await conn.execute(
+                        "UPDATE protected_winners SET invite_status = 'pending', invite_url = NULL, failure_reason = NULL "
+                        "WHERE source_guild_id = ? AND protected_user_id = ? AND protected_brawl_tag = ?",
+                        (self._guild_id, protected["protected_user_id"], protected["protected_brawl_tag"]),
+                    )
+            await conn.commit()
+        except Exception:
+            await conn.rollback()
+            raise
 
     async def get_winner_destination(self) -> tuple[int, int] | None:
         row = await _fetchone(

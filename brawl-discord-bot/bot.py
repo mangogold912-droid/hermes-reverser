@@ -40,7 +40,7 @@ def _is_admin(interaction: discord.Interaction) -> bool:
 class DailyQueueView(discord.ui.View):
     """Persistent join button for the current daily event."""
 
-    def __init__(self, bot: "BrawlEliminationBot") -> None:
+    def __init__(self, bot: "BrawlChallengeBot") -> None:
         super().__init__(timeout=None)
         self.bot = bot
 
@@ -124,6 +124,13 @@ class BrawlChallengeBot(commands.Bot):
             self.settings.winner_guild_id,
             self.settings.winner_invite_channel_id,
         )
+        server_channels = await self.db.get_server_channels()
+        if server_channels:
+            self.settings = replace(
+                self.settings,
+                queue_channel_id=server_channels[0],
+                result_channel_id=server_channels[1],
+            )
         destination = await self.db.get_winner_destination()
         if destination:
             self.settings = replace(
@@ -337,6 +344,120 @@ class BrawlChallengeBot(commands.Bot):
                 user_id=member.id,
                 mention=member.mention,
                 tag=tag,
+            )
+
+        @app_commands.command(name="configure_servers", description="메인·보조 서버와 모집/결과 채널을 개인 봇에 적용합니다.")
+        @app_commands.describe(
+            main_guild_id="현재 명령을 실행하는 메인 서버 ID",
+            queue_channel_id="참가 신청 패널을 올릴 메인 서버 채널 ID",
+            result_channel_id="경기 공지/결과 채널 ID (모집 채널과 같아도 됩니다)",
+            winner_guild_id="보조 승자 서버 ID",
+            invite_channel_id="보조 서버에서 초대장을 만들 채널 ID",
+        )
+        @app_commands.default_permissions(administrator=True)
+        async def configure_servers(
+            interaction: discord.Interaction,
+            main_guild_id: str,
+            queue_channel_id: str,
+            result_channel_id: str,
+            winner_guild_id: str,
+            invite_channel_id: str,
+        ) -> None:
+            if not _is_admin(interaction):
+                await _send_ephemeral(interaction, "이 명령은 서버 관리자만 사용할 수 있습니다.")
+                return
+            if interaction.guild is None:
+                await _send_ephemeral(interaction, "메인 서버 안에서만 사용할 수 있습니다.")
+                return
+            raw_ids = (main_guild_id, queue_channel_id, result_channel_id, winner_guild_id, invite_channel_id)
+            if any(not value.strip().isdecimal() or int(value.strip()) <= 0 for value in raw_ids):
+                await _send_ephemeral(interaction, "서버 ID와 채널 ID는 양의 숫자로 입력해 주세요.")
+                return
+            main_id, queue_id, result_id, destination_id, invite_id = (int(value.strip()) for value in raw_ids)
+            if main_id != interaction.guild.id or main_id != self.settings.guild_id:
+                await _send_ephemeral(
+                    interaction,
+                    "메인 서버 ID는 현재 명령을 실행한 서버 및 봇의 DISCORD_GUILD_ID와 일치해야 합니다.",
+                )
+                return
+            if destination_id == main_id:
+                await _send_ephemeral(interaction, "보조 승자 서버는 메인 서버와 달라야 합니다.")
+                return
+            await interaction.response.defer(ephemeral=True, thinking=True)
+            main_guild = self.get_guild(main_id)
+            destination_guild = self.get_guild(destination_id)
+            if main_guild is None or destination_guild is None:
+                await _send_ephemeral(interaction, "봇이 메인 서버와 보조 서버 양쪽에 초대되어 있어야 합니다.")
+                return
+            bot_main_member = main_guild.me
+            bot_destination_member = destination_guild.me
+            if bot_main_member is None or bot_destination_member is None:
+                await _send_ephemeral(interaction, "봇 멤버 정보를 확인할 수 없습니다. Server Members Intent를 확인해 주세요.")
+                return
+            try:
+                queue_channel = await self._fetch_channel(queue_id)
+                result_channel = await self._fetch_channel(result_id)
+                invite_channel = await self._fetch_channel(invite_id)
+            except discord.NotFound:
+                await _send_ephemeral(interaction, "입력한 채널 중 하나를 찾을 수 없습니다. 채널 ID를 확인해 주세요.")
+                return
+            except discord.Forbidden:
+                await _send_ephemeral(interaction, "봇이 입력한 채널을 조회할 권한이 없습니다.")
+                return
+            except discord.HTTPException:
+                log.exception("Could not fetch channels while configuring servers")
+                await _send_ephemeral(interaction, "Discord에서 채널을 조회하지 못했습니다. 잠시 후 다시 시도해 주세요.")
+                return
+            if getattr(getattr(queue_channel, "guild", None), "id", None) != main_id or getattr(
+                getattr(result_channel, "guild", None), "id", None
+            ) != main_id:
+                await _send_ephemeral(interaction, "모집 채널과 결과 채널은 입력한 메인 서버 안에 있어야 합니다.")
+                return
+            if getattr(getattr(invite_channel, "guild", None), "id", None) != destination_id:
+                await _send_ephemeral(interaction, "초대 채널은 입력한 보조 서버 안에 있어야 합니다.")
+                return
+            required_channel_permissions = ("view_channel", "send_messages", "embed_links", "read_message_history")
+            for label, channel in (("모집", queue_channel), ("결과", result_channel)):
+                permissions_for = getattr(channel, "permissions_for", None)
+                if not callable(permissions_for):
+                    await _send_ephemeral(interaction, f"{label} 채널은 텍스트/스레드 채널이어야 합니다.")
+                    return
+                permissions = permissions_for(bot_main_member)
+                if any(not getattr(permissions, permission, False) for permission in required_channel_permissions):
+                    await _send_ephemeral(interaction, f"봇에 {label} 채널의 View, Send, Embed, Read History 권한이 필요합니다.")
+                    return
+            invite_permissions_for = getattr(invite_channel, "permissions_for", None)
+            if not bot_destination_member.guild_permissions.kick_members:
+                await _send_ephemeral(interaction, "보조 서버에서 봇에 Kick Members 권한을 부여해 주세요.")
+                return
+            if not callable(invite_permissions_for) or not invite_permissions_for(bot_destination_member).create_instant_invite:
+                await _send_ephemeral(interaction, "초대 채널에서 봇에 Create Instant Invite 권한을 부여해 주세요.")
+                return
+            try:
+                await self.db.configure_servers(
+                    queue_channel_id=queue_id,
+                    result_channel_id=result_id,
+                    winner_guild_id=destination_id,
+                    invite_channel_id=invite_id,
+                )
+            except ValueError as exc:
+                await _send_ephemeral(interaction, str(exc))
+                return
+            except Exception:
+                log.exception("Could not save main/secondary server configuration")
+                await _send_ephemeral(interaction, "서버 설정을 저장하지 못했습니다. 데이터베이스를 확인해 주세요.")
+                return
+            self.settings = replace(
+                self.settings,
+                queue_channel_id=queue_id,
+                result_channel_id=result_id,
+                winner_guild_id=destination_id,
+                winner_invite_channel_id=invite_id,
+            )
+            await _send_ephemeral(
+                interaction,
+                f"서버 설정을 저장했습니다. 메인 서버: **{interaction.guild.name}** (`{main_id}`), 보조 서버 ID: `{destination_id}`. "
+                "모집/결과 채널과 초대 채널 설정은 재시작 후에도 유지됩니다.",
             )
 
         @app_commands.command(name="set_winner_server", description="보호 대상을 이긴 참가자가 초대를 받을 보조 서버를 설정합니다.")
@@ -702,6 +823,7 @@ class BrawlChallengeBot(commands.Bot):
             leave_queue,
             set_protected,
             set_protected_id,
+            configure_servers,
             set_winner_server,
             phone_verification_status,
             enable_phone_verification,
