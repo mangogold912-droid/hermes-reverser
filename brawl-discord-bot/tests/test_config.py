@@ -25,6 +25,8 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(settings.allowed_modes, ("bounty",))
         self.assertEqual(settings.match_poll_seconds, 10)
         self.assertEqual(settings.event_size, 10)
+        self.assertIsNone(settings.protected_discord_id)
+        self.assertIsNone(settings.protected_brawl_tag)
 
     def test_rejects_non_bounty_mode(self):
         with self.assertRaisesRegex(ValueError, "locked to Bounty"):

@@ -30,7 +30,7 @@ Discord 초대 링크 자체는 특정 계정에 묶이지 않습니다. 다른 
 
 태그 조회는 계정의 존재를 확인할 뿐, 해당 계정이 Discord 사용자 본인의 것인지는 증명하지 않습니다. 요청대로 참가자 태그의 관리자 승인을 없앴기 때문에 사용자가 타인의 태그를 등록할 위험이 있습니다. 그 경우 잘못된 Discord 계정이 경기 결과와 연결될 수 있습니다. 태그 소유권을 확실히 확인해야 한다면 일반 참가자 등록에 관리자 검수가 필요합니다. 봇은 같은 Brawl 태그를 두 Discord 계정에 중복 등록하는 것은 막습니다.
 
-고정 보호 대상은 예외적으로 관리자가 Discord 계정과 Brawl 태그를 함께 지정합니다. `/set_protected member tag`는 태그를 Supercell API로 확인하고 그 연결을 고정하므로, 보호 대상으로 지정된 Discord 계정이 임의의 다른 Brawl 태그를 등록해 보호 규칙이나 승자 자격을 잘못 적용하는 일을 막습니다. 경기 결과 처리에서는 이 Discord ID **또는** 고정 보호 Brawl 태그가 패자로 감지되면 밴하지 않습니다. 보조 서버 자격은 고정 Brawl 태그가 실제 패배자로 확인된 경기에서만 부여합니다.
+고정 보호 대상은 예외적으로 관리자가 Discord 계정과 Brawl 태그를 함께 지정합니다. `/set_protected member tag` 또는 숫자 ID를 받는 `/set_protected_id user_id tag`는 태그를 Supercell API로 확인하고 그 연결을 고정하므로, 보호 대상으로 지정된 Discord 계정이 임의의 다른 Brawl 태그를 등록해 보호 규칙이나 승자 자격을 잘못 적용하는 일을 막습니다. 경기 결과 처리에서는 이 Discord ID **또는** 고정 보호 Brawl 태그가 패자로 감지되면 밴하지 않습니다. 보조 서버 자격은 고정 Brawl 태그가 실제 패배자로 확인된 경기에서만 부여합니다.
 
 ### Discord ID·태그 차단과 전화 인증
 
@@ -96,8 +96,8 @@ docker compose up --build -d
 
 - `DISCORD_BOT_TOKEN`, `BRAWL_STARS_API_TOKEN`
 - `DISCORD_GUILD_ID`, `QUEUE_CHANNEL_ID`, 선택적 `RESULT_CHANNEL_ID`
-- `PROTECTED_DISCORD_ID`와 `PROTECTED_BRAWL_TAG` (또는 실행 후 관리자가 `/set_protected member tag` 사용)
-- 보호 계정은 처음 DB를 만들 때 `.env` 값으로 초기화됩니다. 이후에는 SQLite에 저장된 설정이 기준이므로 변경은 `/set_protected`로 하세요.
+- `PROTECTED_DISCORD_ID`와 `PROTECTED_BRAWL_TAG`는 둘 다 입력하거나 둘 다 비워 두세요. 비워 두면 실행 후 관리자가 `/set_protected member tag` 또는 `/set_protected_id user_id tag`로 설정할 수 있습니다.
+- 보호 계정은 `.env` 값 또는 관리자 명령으로 처음 설정할 수 있습니다. 이후에는 SQLite 저장값이 기준이며, 변경도 명령어로 합니다.
 - `WINNER_GUILD_ID`, `WINNER_INVITE_CHANNEL_ID` (선택; 또는 관리자 `/set_winner_server`로 설정)
 - `WINNER_SERVER_STAFF_IDS` (보조 서버에서 자격 검사에서 제외할 운영자 ID, 쉼표 구분)
 - `DRY_RUN=true` (시험 모드), `ALLOWED_MODES=bounty` (다른 모드로 변경 불가)
@@ -111,7 +111,8 @@ docker compose up --build -d
 | `/register tag` | 참가자 | 유효한 브롤 태그 등록; 관리자 승인 없이 참가 가능 |
 | `/my_tag` | 참가자 | 내 태그 등록 상태 확인 |
 | `/leave_queue` | 참가자 | 10명 마감 전 대기열에서 나가기; 남은 번호 재정렬 |
-| `/set_protected member tag` | 관리자 | 보호 Discord 계정과 고정 Brawl 태그 설정; 이벤트 진행 중 변경 불가 |
+| `/set_protected member tag` | 관리자 | 멤버 선택으로 보호 Discord 계정과 고정 Brawl 태그 설정; 이벤트 진행 중 변경 불가 |
+| `/set_protected_id user_id tag` | 관리자 | 숫자 Discord ID로 보호 대상 지정; 메인 서버 멤버여야 하며 이벤트 중 변경 불가 |
 | `/open_event` | 관리자 | 정기 시간 외에 모집 즉시 시작 |
 | `/event_status` | 서버 멤버 | 모집 순번, 보호 대상 1대1 경기 및 결과 감지 상태 확인 |
 | `/resolve_match slot winner` | 관리자 | API 판정이 안 된 현재 도전자 경기의 승자 직접 확정 |
@@ -127,7 +128,7 @@ docker compose up --build -d
 
 ## 처음 설정할 때
 
-1. `.env`에 메인 서버/채널, Discord 토큰, Supercell API 키, 보호 대상의 Discord ID와 고정 Brawl 태그를 입력합니다. 또는 봇 실행 후 `/set_protected member tag`로 설정합니다. 이 명령은 해당 태그를 API로 검증하고 계정 연결을 고정합니다.
+1. `.env`에 메인 서버/채널, Discord 토큰, Supercell API 키를 입력합니다. 보호 대상 Discord ID와 Brawl 태그는 `.env`에 함께 넣거나, 봇 실행 후 관리자가 `/set_protected member tag` 또는 `/set_protected_id user_id tag`로 설정할 수 있습니다. 두 명령 모두 태그를 API로 확인해 Discord 계정과 고정합니다.
 2. 전화 인증을 요구하려면 메인 서버에서 Verification Level을 **Highest**로 설정하고 `/phone_verification_status`로 확인합니다. 간편 설정을 원하면 봇에 Manage Server 권한을 부여한 뒤 `/enable_phone_verification confirm:true`를 실행할 수 있습니다. 보조 서버를 사용할 경우 봇을 먼저 초대하고 `/set_winner_server guild_id invite_channel_id`를 실행합니다. 운영자가 자격자 외에도 남아야 한다면 ID를 `WINNER_SERVER_STAFF_IDS`에 설정합니다.
 3. `DRY_RUN=true`로 태그 등록, 바운티 1대1 판정, 보호 대상 예외를 시험합니다. 이때 Discord 밴과 내부 ID/태그 차단 목록은 기록하지 않습니다. 다만 보조 서버 설정이 있으면 실제 초대 DM과 입장 제한은 계속 동작하므로 테스트 서버/계정으로 확인하세요.
 4. 실제 메인 서버 영구 밴을 켤 때만 `DRY_RUN=false`로 바꾸고 봇을 재시작합니다.

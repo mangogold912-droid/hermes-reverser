@@ -74,7 +74,7 @@ class DailyQueueView(discord.ui.View):
         protected_id = await self.bot.db.get_protected_user_id()
         protected_tag = await self.bot.db.get_protected_brawl_tag()
         if protected_id is None or protected_tag is None:
-            await _send_ephemeral(interaction, "관리자가 /set_protected로 보호 Discord 계정과 브롤 태그를 설정해야 합니다.")
+            await _send_ephemeral(interaction, "관리자가 /set_protected 또는 /set_protected_id로 보호 Discord 계정과 브롤 태그를 설정해야 합니다.")
             return
         if _is_admin(interaction) and interaction.user.id != protected_id:
             await _send_ephemeral(interaction, "안전 설정상 서버 관리자는 대회 참가자로 등록할 수 없습니다.")
@@ -187,6 +187,42 @@ class BrawlChallengeBot(commands.Bot):
         except discord.HTTPException:
             log.exception("Discord API failed while removing non-qualified user %s", member.id)
 
+    async def _save_protected_target(
+        self,
+        interaction: discord.Interaction,
+        *,
+        user_id: int,
+        mention: str,
+        tag: str,
+    ) -> None:
+        try:
+            canonical_tag = normalize_tag(tag)
+            profile = await self.brawl_api.get_player(canonical_tag)
+            confirmed_tag = normalize_tag(str(profile.get("tag") or canonical_tag))
+            player_name = str(profile.get("name") or "Protected player")[:100]
+            await self.db.set_protected_account(user_id, confirmed_tag, player_name)
+        except (ValueError, BrawlAPIError) as exc:
+            await _send_ephemeral(interaction, str(exc))
+            return
+        except Exception:
+            log.exception("Could not set protected Discord/Brawl account pair")
+            await _send_ephemeral(interaction, "보호 계정을 저장하지 못했습니다. 태그/데이터베이스를 확인해 주세요.")
+            return
+
+        await _send_ephemeral(
+            interaction,
+            f"{mention} · **{player_name}** ({confirmed_tag})을 보호 대상으로 설정했습니다. "
+            "이 Discord 계정은 경기에서 져도 자동 영구밴되지 않습니다.",
+        )
+        now = datetime.now(self.settings.time_zone)
+        scheduled_today = datetime.combine(
+            now.date(),
+            time(self.settings.daily_open_hour, self.settings.daily_open_minute),
+            tzinfo=self.settings.time_zone,
+        )
+        if now >= scheduled_today and await self.db.get_active_event() is None:
+            await self._open_daily_event(now.date())
+
     def _register_app_commands(self) -> None:
         guild = discord.Object(id=self.settings.guild_id)
 
@@ -247,39 +283,61 @@ class BrawlChallengeBot(commands.Bot):
                 await self.refresh_queue_message(int(event["id"]))
             await _send_ephemeral(interaction, f"대기열에서 나왔습니다. 남은 인원은 {remaining}/10명입니다.")
 
-        @app_commands.command(name="set_protected", description="자동 영구밴에서 제외할 Discord 계정과 고정 브롤 태그를 설정합니다.")
+        @app_commands.command(name="set_protected", description="보호 Discord 계정과 고정 Brawl 태그를 설정합니다.")
         @app_commands.describe(member="보호할 Discord 계정", tag="해당 계정의 고정 브롤 태그")
         @app_commands.default_permissions(administrator=True)
         async def set_protected(interaction: discord.Interaction, member: discord.Member, tag: str) -> None:
             if not _is_admin(interaction):
                 await _send_ephemeral(interaction, "이 명령은 서버 관리자만 사용할 수 있습니다.")
                 return
-            try:
-                canonical_tag = normalize_tag(tag)
-                profile = await self.brawl_api.get_player(canonical_tag)
-                confirmed_tag = normalize_tag(str(profile.get("tag") or canonical_tag))
-                player_name = str(profile.get("name") or "Protected player")[:100]
-                await self.db.set_protected_account(member.id, confirmed_tag, player_name)
-            except (ValueError, BrawlAPIError) as exc:
-                await _send_ephemeral(interaction, str(exc))
+            if member.bot:
+                await _send_ephemeral(interaction, "보호 대상은 봇이 아닌 Discord 사용자여야 합니다.")
                 return
-            except Exception:
-                log.exception("Could not set protected Discord/Brawl account pair")
-                await _send_ephemeral(interaction, "보호 계정을 저장하지 못했습니다. 태그/데이터베이스를 확인해 주세요.")
-                return
-            await _send_ephemeral(
+            await self._save_protected_target(
                 interaction,
-                f"{member.mention} · **{player_name}** ({confirmed_tag})을 보호 대상으로 설정했습니다. "
-                "이 Discord 계정은 경기에서 져도 자동 영구밴되지 않습니다.",
+                user_id=member.id,
+                mention=member.mention,
+                tag=tag,
             )
-            now = datetime.now(self.settings.time_zone)
-            scheduled_today = datetime.combine(
-                now.date(),
-                time(self.settings.daily_open_hour, self.settings.daily_open_minute),
-                tzinfo=self.settings.time_zone,
+
+        @app_commands.command(name="set_protected_id", description="Discord 사용자 ID와 고정 Brawl 태그로 보호 대상을 설정합니다.")
+        @app_commands.describe(user_id="메인 서버에 있는 보호 대상의 숫자 Discord ID", tag="해당 계정의 고정 브롤 태그")
+        @app_commands.default_permissions(administrator=True)
+        async def set_protected_id(interaction: discord.Interaction, user_id: str, tag: str) -> None:
+            if not _is_admin(interaction):
+                await _send_ephemeral(interaction, "이 명령은 서버 관리자만 사용할 수 있습니다.")
+                return
+            if not user_id.strip().isdecimal() or int(user_id.strip()) <= 0:
+                await _send_ephemeral(interaction, "Discord ID는 양의 숫자로 입력해 주세요.")
+                return
+            guild = interaction.guild
+            if guild is None:
+                await _send_ephemeral(interaction, "메인 서버 안에서만 사용할 수 있습니다.")
+                return
+            target_id = int(user_id.strip())
+            member = guild.get_member(target_id)
+            if member is None:
+                try:
+                    member = await guild.fetch_member(target_id)
+                except discord.NotFound:
+                    await _send_ephemeral(interaction, "해당 Discord ID의 사용자가 메인 서버에 없습니다.")
+                    return
+                except discord.Forbidden:
+                    await _send_ephemeral(interaction, "대상 멤버를 조회할 권한이 없습니다. Server Members Intent와 권한을 확인해 주세요.")
+                    return
+                except discord.HTTPException:
+                    log.exception("Could not fetch member %s while setting protected target", target_id)
+                    await _send_ephemeral(interaction, "Discord에서 대상 멤버를 조회하지 못했습니다. 잠시 후 다시 시도해 주세요.")
+                    return
+            if member.bot:
+                await _send_ephemeral(interaction, "보호 대상은 봇이 아닌 Discord 사용자여야 합니다.")
+                return
+            await self._save_protected_target(
+                interaction,
+                user_id=member.id,
+                mention=member.mention,
+                tag=tag,
             )
-            if now >= scheduled_today and await self.db.get_active_event() is None:
-                await self._open_daily_event(now.date())
 
         @app_commands.command(name="set_winner_server", description="보호 대상을 이긴 참가자가 초대를 받을 보조 서버를 설정합니다.")
         @app_commands.describe(
@@ -300,7 +358,7 @@ class BrawlChallengeBot(commands.Bot):
                 await _send_ephemeral(interaction, "보조 서버는 메인 대회 서버와 달라야 합니다.")
                 return
             if await self.db.get_protected_user_id() is None or await self.db.get_protected_brawl_tag() is None:
-                await _send_ephemeral(interaction, "먼저 /set_protected로 보호 계정과 Brawl 태그를 설정해 주세요.")
+                await _send_ephemeral(interaction, "먼저 /set_protected 또는 /set_protected_id로 보호 계정과 Brawl 태그를 설정해 주세요.")
                 return
             target_guild = self.get_guild(target_guild_id)
             if target_guild is None:
@@ -614,7 +672,7 @@ class BrawlChallengeBot(commands.Bot):
                 return
             protected_id = await self.db.get_protected_user_id()
             if protected_id is None:
-                await _send_ephemeral(interaction, "먼저 메인 서버에서 /set_protected를 설정해 주세요.")
+                await _send_ephemeral(interaction, "먼저 메인 서버에서 /set_protected 또는 /set_protected_id를 설정해 주세요.")
                 return
             removed = 0
             kept = 0
@@ -643,6 +701,7 @@ class BrawlChallengeBot(commands.Bot):
             my_tag,
             leave_queue,
             set_protected,
+            set_protected_id,
             set_winner_server,
             phone_verification_status,
             enable_phone_verification,
@@ -667,7 +726,7 @@ class BrawlChallengeBot(commands.Bot):
         protected_id = await self.db.get_protected_user_id()
         protected_tag = await self.db.get_protected_brawl_tag()
         if protected_id is None or protected_tag is None:
-            raise ValueError("먼저 관리자가 /set_protected로 보호 Discord 계정과 브롤 태그를 설정해야 합니다.")
+            raise ValueError("먼저 관리자가 /set_protected 또는 /set_protected_id로 보호 Discord 계정과 브롤 태그를 설정해야 합니다.")
         source_guild = self.get_guild(self.settings.guild_id)
         if source_guild is None or source_guild.verification_level != discord.VerificationLevel.highest:
             raise ValueError("전화번호 인증을 강제하려면 메인 서버 Verification Level을 Highest로 설정해야 합니다.")
@@ -830,7 +889,7 @@ class BrawlChallengeBot(commands.Bot):
         if await self.db.get_protected_user_id() is None or await self.db.get_protected_brawl_tag() is None:
             await self._send_to_channel(
                 self.settings.result_channel_id,
-                content="오늘 참가 모집을 열지 않았습니다. 관리자가 /set_protected로 보호 Discord 계정과 브롤 태그를 먼저 설정해 주세요.",
+                content="오늘 참가 모집을 열지 않았습니다. 관리자가 /set_protected 또는 /set_protected_id로 보호 Discord 계정과 브롤 태그를 먼저 설정해 주세요.",
             )
             return
         try:
