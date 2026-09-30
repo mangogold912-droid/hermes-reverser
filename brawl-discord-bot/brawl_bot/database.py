@@ -1,12 +1,37 @@
 from __future__ import annotations
 
+import asyncio
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 import aiosqlite
 
 from .brawl_api import normalize_tag
+
+
+_ACTIVE_GUILD_ID: ContextVar[int | None] = ContextVar("brawl_active_guild_id", default=None)
+
+
+@contextmanager
+def use_guild(guild_id: int) -> Iterator[None]:
+    """Route database calls in this async task to one isolated Discord guild."""
+    token = _ACTIVE_GUILD_ID.set(int(guild_id))
+    try:
+        yield
+    finally:
+        _ACTIVE_GUILD_ID.reset(token)
+
+
+def activate_guild(guild_id: int) -> None:
+    """Set the current async task's guild scope (useful for interaction callbacks)."""
+    _ACTIVE_GUILD_ID.set(int(guild_id))
+
+
+def current_guild_id() -> int | None:
+    return _ACTIVE_GUILD_ID.get()
 
 
 SCHEMA = """
@@ -19,7 +44,8 @@ CREATE TABLE IF NOT EXISTS guild_settings (
     winner_guild_id INTEGER,
     winner_invite_channel_id INTEGER,
     queue_channel_id INTEGER,
-    result_channel_id INTEGER
+    result_channel_id INTEGER,
+    auto_ban_enabled INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS registrations (
@@ -162,6 +188,8 @@ class Database:
             await self.conn.execute("ALTER TABLE guild_settings ADD COLUMN queue_channel_id INTEGER")
         if not any(row["name"] == "result_channel_id" for row in settings_columns):
             await self.conn.execute("ALTER TABLE guild_settings ADD COLUMN result_channel_id INTEGER")
+        if not any(row["name"] == "auto_ban_enabled" for row in settings_columns):
+            await self.conn.execute("ALTER TABLE guild_settings ADD COLUMN auto_ban_enabled INTEGER NOT NULL DEFAULT 0")
         match_columns = await _fetchall(self.conn, "PRAGMA table_info(matches)")
         if not any(row["name"] == "winner_qualified" for row in match_columns):
             await self.conn.execute("ALTER TABLE matches ADD COLUMN winner_qualified INTEGER NOT NULL DEFAULT 0")
@@ -333,6 +361,39 @@ class Database:
             (self._guild_id, queue_channel_id, result_channel_id),
         )
         await self._db().commit()
+
+    async def get_auto_ban_enabled(self) -> bool:
+        row = await _fetchone(
+            self._db(),
+            "SELECT auto_ban_enabled FROM guild_settings WHERE guild_id = ?",
+            (self._guild_id,),
+        )
+        return bool(row and row["auto_ban_enabled"])
+
+    async def set_auto_ban_enabled(self, enabled: bool) -> None:
+        await self._db().execute(
+            "INSERT INTO guild_settings(guild_id, auto_ban_enabled) VALUES (?, ?) "
+            "ON CONFLICT(guild_id) DO UPDATE SET auto_ban_enabled = excluded.auto_ban_enabled",
+            (self._guild_id, int(enabled)),
+        )
+        await self._db().commit()
+
+    async def get_configured_guild_ids(self) -> list[int]:
+        rows = await _fetchall(
+            self._db(),
+            "SELECT guild_id FROM guild_settings WHERE queue_channel_id IS NOT NULL "
+            "AND result_channel_id IS NOT NULL ORDER BY guild_id",
+        )
+        return [int(row["guild_id"]) for row in rows]
+
+    async def get_source_guild_ids_for_destination(self, destination_guild_id: int) -> list[int]:
+        rows = await _fetchall(
+            self._db(),
+            "SELECT guild_id FROM guild_settings WHERE winner_guild_id = ? "
+            "AND protected_user_id IS NOT NULL AND protected_brawl_tag IS NOT NULL ORDER BY guild_id",
+            (destination_guild_id,),
+        )
+        return [int(row["guild_id"]) for row in rows]
 
     async def configure_servers(
         self,
@@ -1165,3 +1226,102 @@ class Database:
         except Exception:
             await conn.rollback()
             raise
+
+
+class MultiGuildDatabase:
+    """Per-guild SQLite contexts sharing one file and isolated settings/data."""
+
+    def __init__(self, path: Path, default_guild_id: int | None = None) -> None:
+        self.path = path
+        self.default_guild_id = default_guild_id
+        self._instances: dict[int, Database] = {}
+        self._guild_locks: dict[int, asyncio.Lock] = {}
+        self._catalog: Database | None = None
+        self._open_lock = asyncio.Lock()
+        self._defaults: tuple[int | None, str | None, int | None, int | None] = (None, None, None, None)
+
+    def bind_guild(self, guild_id: int | None) -> None:
+        """Set the legacy fallback guild used outside an explicit guild context."""
+        self.default_guild_id = int(guild_id) if guild_id is not None else None
+
+    def activate_guild(self, guild_id: int) -> None:
+        activate_guild(guild_id)
+
+    @contextmanager
+    def guild_context(self, guild_id: int) -> Iterator[None]:
+        with use_guild(guild_id):
+            yield
+
+    async def open(
+        self,
+        default_protected_user_id: int | None = None,
+        default_protected_brawl_tag: str | None = None,
+        default_winner_guild_id: int | None = None,
+        default_winner_invite_channel_id: int | None = None,
+    ) -> None:
+        self._defaults = (
+            default_protected_user_id,
+            default_protected_brawl_tag,
+            default_winner_guild_id,
+            default_winner_invite_channel_id,
+        )
+        async with self._open_lock:
+            if self._catalog is None:
+                catalog = Database(self.path)
+                catalog.bind_guild(0)
+                await catalog.open()
+                self._catalog = catalog
+        if self.default_guild_id is not None:
+            await self._database_for(self.default_guild_id)
+
+    async def close(self) -> None:
+        instances = list(self._instances.values())
+        if self._catalog is not None:
+            instances.append(self._catalog)
+        self._instances.clear()
+        self._catalog = None
+        if instances:
+            await asyncio.gather(*(db.close() for db in instances), return_exceptions=True)
+
+    async def _database_for(self, guild_id: int) -> Database:
+        guild_id = int(guild_id)
+        db = self._instances.get(guild_id)
+        if db is not None:
+            return db
+        async with self._open_lock:
+            db = self._instances.get(guild_id)
+            if db is None:
+                db = Database(self.path)
+                db.bind_guild(guild_id)
+                defaults = self._defaults if guild_id == self.default_guild_id else (None, None, None, None)
+                await db.open(*defaults)
+                self._instances[guild_id] = db
+        return db
+
+    async def get_configured_guild_ids(self) -> list[int]:
+        if self._catalog is None:
+            await self.open()
+        assert self._catalog is not None
+        return await self._catalog.get_configured_guild_ids()
+
+    async def get_source_guild_ids_for_destination(self, destination_guild_id: int) -> list[int]:
+        if self._catalog is None:
+            await self.open()
+        assert self._catalog is not None
+        return await self._catalog.get_source_guild_ids_for_destination(destination_guild_id)
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("_"):
+            raise AttributeError(name)
+
+        async def routed_call(*args: Any, **kwargs: Any) -> Any:
+            guild_id = current_guild_id() or self.default_guild_id
+            if guild_id is None:
+                raise RuntimeError("A Discord guild context is required for this database operation")
+            db = await self._database_for(guild_id)
+            lock = self._guild_locks.setdefault(int(guild_id), asyncio.Lock())
+            async with lock:
+                method = getattr(db, name)
+                return await method(*args, **kwargs)
+
+        return routed_call

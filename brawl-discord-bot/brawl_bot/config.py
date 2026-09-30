@@ -14,9 +14,9 @@ from .brawl_api import normalize_tag
 class Settings:
     discord_token: str
     brawl_stars_api_token: str
-    guild_id: int
-    queue_channel_id: int
-    result_channel_id: int
+    guild_id: int | None
+    queue_channel_id: int | None
+    result_channel_id: int | None
     protected_discord_id: int | None
     protected_brawl_tag: str | None
     winner_guild_id: int | None
@@ -87,9 +87,15 @@ def load_settings() -> Settings:
     """Load settings from environment and an optional local .env file."""
     load_dotenv()
 
-    guild_id = _snowflake("DISCORD_GUILD_ID")
-    queue_channel_id = _snowflake("QUEUE_CHANNEL_ID")
+    # Optional legacy bootstrap defaults. Public/multi-server installs configure
+    # each guild through /configure_servers and do not need a fixed guild ID.
+    guild_id = _snowflake("DISCORD_GUILD_ID", required=False)
+    queue_channel_id = _snowflake("QUEUE_CHANNEL_ID", required=False)
     result_channel_id = _snowflake("RESULT_CHANNEL_ID", required=False) or queue_channel_id
+    if bool(guild_id) != bool(queue_channel_id):
+        raise ValueError("Set both DISCORD_GUILD_ID and QUEUE_CHANNEL_ID for legacy bootstrap, or leave both empty")
+    if result_channel_id is not None and guild_id is None:
+        raise ValueError("RESULT_CHANNEL_ID requires DISCORD_GUILD_ID and QUEUE_CHANNEL_ID")
     protected_id = _snowflake("PROTECTED_DISCORD_ID", required=False)
     protected_tag_raw = os.getenv("PROTECTED_BRAWL_TAG", "").strip()
     if bool(protected_id) != bool(protected_tag_raw):
@@ -105,8 +111,10 @@ def load_settings() -> Settings:
         raise ValueError("WINNER_INVITE_CHANNEL_ID is required when WINNER_GUILD_ID is set")
     if winner_invite_channel_id and not winner_guild_id:
         raise ValueError("WINNER_GUILD_ID is required when WINNER_INVITE_CHANNEL_ID is set")
-    if winner_guild_id == guild_id:
+    if winner_guild_id is not None and winner_guild_id == guild_id:
         raise ValueError("WINNER_GUILD_ID must be a different server from DISCORD_GUILD_ID")
+    if guild_id is None and any((protected_id, protected_tag, winner_guild_id, winner_invite_channel_id)):
+        raise ValueError("PROTECTED_* and WINNER_* environment settings require the legacy DISCORD_GUILD_ID; public installs configure per guild in Discord")
 
     time_zone_name = os.getenv("TIME_ZONE", "Asia/Seoul").strip() or "Asia/Seoul"
     try:

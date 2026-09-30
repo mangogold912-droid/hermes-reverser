@@ -13,7 +13,7 @@ from discord.ext import commands
 from brawl_bot.battle_logic import BattleDecision, evaluate_pair_logs
 from brawl_bot.brawl_api import BrawlAPIError, BrawlStarsAPI, normalize_tag
 from brawl_bot.config import Settings, load_settings
-from brawl_bot.database import Database
+from brawl_bot.database import MultiGuildDatabase, current_guild_id
 
 
 logging.basicConfig(
@@ -37,6 +37,33 @@ def _is_admin(interaction: discord.Interaction) -> bool:
     return bool(permissions and permissions.administrator)
 
 
+class BrawlCommandTree(app_commands.CommandTree):
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.guild_id is None:
+            await _send_ephemeral(interaction, "이 명령은 봇이 설치된 Discord 서버 안에서만 사용할 수 있습니다.")
+            return False
+        bot = self.client
+        if not isinstance(bot, BrawlChallengeBot):
+            return False
+        bot.db.activate_guild(interaction.guild_id)
+        try:
+            settings = await bot.ensure_guild_settings(interaction.guild_id)
+        except Exception:
+            log.exception("Could not load settings for guild %s", interaction.guild_id)
+            await _send_ephemeral(interaction, "이 서버 설정을 불러오지 못했습니다. 잠시 후 다시 시도해 주세요.")
+            return False
+        command_name = str((interaction.data or {}).get("name", ""))
+        if command_name != "configure_servers" and (
+            settings.queue_channel_id is None or settings.result_channel_id is None
+        ):
+            await _send_ephemeral(
+                interaction,
+                "먼저 서버 관리자가 `/configure_servers`를 실행해 대회 채널과 보조 서버를 설정해야 합니다.",
+            )
+            return False
+        return True
+
+
 class DailyQueueView(discord.ui.View):
     """Persistent join button for the current daily event."""
 
@@ -50,8 +77,13 @@ class DailyQueueView(discord.ui.View):
         custom_id="brawl_elimination:daily_join:v1",
     )
     async def join_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-        if interaction.guild_id != self.bot.settings.guild_id:
-            await _send_ephemeral(interaction, "이 버튼은 설정된 대회 서버에서만 사용할 수 있습니다.")
+        if interaction.guild_id is None:
+            await _send_ephemeral(interaction, "이 버튼은 Discord 서버 안에서만 사용할 수 있습니다.")
+            return
+        self.bot.db.activate_guild(interaction.guild_id)
+        settings = await self.bot.ensure_guild_settings(interaction.guild_id)
+        if settings.queue_channel_id is None or settings.result_channel_id is None:
+            await _send_ephemeral(interaction, "이 서버는 아직 대회 서버로 설정되지 않았습니다.")
             return
         if interaction.user.bot:
             await _send_ephemeral(interaction, "봇 계정은 참가할 수 없습니다.")
@@ -105,47 +137,113 @@ class DailyQueueView(discord.ui.View):
 class BrawlChallengeBot(commands.Bot):
     def __init__(self, settings: Settings) -> None:
         intents = discord.Intents.default()
-        # Required to verify entrants to the secondary winners-only server.
+        # Required for winners-only destination checks and protected-target membership checks.
         intents.members = True
-        super().__init__(command_prefix="!", intents=intents, help_command=None)
-        self.settings = settings
-        self.db = Database(settings.database_path)
-        self.db.bind_guild(settings.guild_id)
+        super().__init__(
+            command_prefix="!",
+            intents=intents,
+            help_command=None,
+            tree_cls=BrawlCommandTree,
+            allowed_contexts=app_commands.AppCommandContext(guild=True, dm_channel=False, private_channel=False),
+            allowed_installs=app_commands.AppInstallationType(guild=True, user=False),
+        )
+        self._base_settings = settings
+        self._guild_settings: dict[int, Settings] = {}
+        self.db = MultiGuildDatabase(settings.database_path, settings.guild_id)
         self.brawl_api = BrawlStarsAPI(settings.brawl_stars_api_token)
+        self._daily_attempted: dict[int, date] = {}
         self._daily_task: asyncio.Task[None] | None = None
         self._poll_task: asyncio.Task[None] | None = None
         self._view_registered = False
         self._register_app_commands()
 
+    @property
+    def settings(self) -> Settings:
+        guild_id = current_guild_id()
+        if guild_id is None:
+            return self._base_settings
+        configured = self._guild_settings.get(guild_id)
+        if configured is not None:
+            return configured
+        return replace(
+            self._base_settings,
+            guild_id=guild_id,
+            queue_channel_id=None,
+            result_channel_id=None,
+            protected_discord_id=None,
+            protected_brawl_tag=None,
+            winner_guild_id=None,
+            winner_invite_channel_id=None,
+            dry_run=True,
+        )
+
+    async def ensure_guild_settings(self, guild_id: int) -> Settings:
+        guild_id = int(guild_id)
+        cached = self._guild_settings.get(guild_id)
+        if cached is not None:
+            return cached
+        with self.db.guild_context(guild_id):
+            channels = await self.db.get_server_channels()
+            if channels is None and guild_id == self._base_settings.guild_id:
+                if self._base_settings.queue_channel_id is not None and self._base_settings.result_channel_id is not None:
+                    await self.db.set_server_channels(
+                        self._base_settings.queue_channel_id,
+                        self._base_settings.result_channel_id,
+                    )
+                    channels = (self._base_settings.queue_channel_id, self._base_settings.result_channel_id)
+            destination = await self.db.get_winner_destination()
+            protected_id = await self.db.get_protected_user_id()
+            protected_tag = await self.db.get_protected_brawl_tag()
+            auto_ban_enabled = await self.db.get_auto_ban_enabled()
+        configured = replace(
+            self._base_settings,
+            guild_id=guild_id,
+            queue_channel_id=channels[0] if channels else None,
+            result_channel_id=channels[1] if channels else None,
+            protected_discord_id=protected_id,
+            protected_brawl_tag=protected_tag,
+            winner_guild_id=destination[0] if destination else None,
+            winner_invite_channel_id=destination[1] if destination else None,
+            dry_run=self._base_settings.dry_run or not auto_ban_enabled,
+        )
+        self._guild_settings[guild_id] = configured
+        return configured
+
     async def setup_hook(self) -> None:
         await self.db.open(
-            self.settings.protected_discord_id,
-            self.settings.protected_brawl_tag,
-            self.settings.winner_guild_id,
-            self.settings.winner_invite_channel_id,
+            self._base_settings.protected_discord_id,
+            self._base_settings.protected_brawl_tag,
+            self._base_settings.winner_guild_id,
+            self._base_settings.winner_invite_channel_id,
         )
-        server_channels = await self.db.get_server_channels()
-        if server_channels:
-            self.settings = replace(
-                self.settings,
-                queue_channel_id=server_channels[0],
-                result_channel_id=server_channels[1],
-            )
-        destination = await self.db.get_winner_destination()
-        if destination:
-            self.settings = replace(
-                self.settings,
-                winner_guild_id=destination[0],
-                winner_invite_channel_id=destination[1],
-            )
+        configured_guild_ids = await self.db.get_configured_guild_ids()
+        if self._base_settings.guild_id is not None and self._base_settings.guild_id not in configured_guild_ids:
+            with self.db.guild_context(self._base_settings.guild_id):
+                if self._base_settings.queue_channel_id is not None and self._base_settings.result_channel_id is not None:
+                    await self.db.set_server_channels(
+                        self._base_settings.queue_channel_id,
+                        self._base_settings.result_channel_id,
+                    )
+                    configured_guild_ids.append(self._base_settings.guild_id)
+        for guild_id in configured_guild_ids:
+            await self.ensure_guild_settings(guild_id)
+
         await self.brawl_api.start()
         if not self._view_registered:
             self.add_view(DailyQueueView(self))
             self._view_registered = True
 
-        guild = discord.Object(id=self.settings.guild_id)
-        await self.tree.sync(guild=guild)
-        log.info("Slash commands synced to guild %s", self.settings.guild_id)
+        # Global commands make the bot usable in every guild where it is installed.
+        await self.tree.sync()
+        log.info("Global slash commands synced")
+        # Remove old guild-scoped copies from the single-guild version of this bot.
+        for guild_id in configured_guild_ids:
+            guild = discord.Object(id=guild_id)
+            self.tree.clear_commands(guild=guild)
+            try:
+                await self.tree.sync(guild=guild)
+            except discord.HTTPException:
+                log.exception("Could not remove legacy guild-scoped commands from guild %s", guild_id)
 
         self._daily_task = asyncio.create_task(self._daily_scheduler(), name="daily-queue-scheduler")
         self._poll_task = asyncio.create_task(self._match_poller(), name="battle-log-poller")
@@ -164,30 +262,43 @@ class BrawlChallengeBot(commands.Bot):
     async def on_ready(self) -> None:
         log.info("Connected as %s (%s)", self.user, self.user.id if self.user else "unknown")
 
+    async def qualified_sources_for_destination(self, destination_guild_id: int, user_id: int) -> list[tuple[int, int]]:
+        """Return every source guild where this account earned access to this destination."""
+        qualified: list[tuple[int, int]] = []
+        for source_guild_id in await self.db.get_source_guild_ids_for_destination(destination_guild_id):
+            await self.ensure_guild_settings(source_guild_id)
+            with self.db.guild_context(source_guild_id):
+                protected_id = await self.db.get_protected_user_id()
+                if protected_id is not None and await self.db.is_qualified_winner(user_id, protected_id):
+                    qualified.append((source_guild_id, protected_id))
+                    await self.db.mark_winner_joined(user_id, protected_id)
+        return qualified
+
     async def on_member_join(self, member: discord.Member) -> None:
-        target_guild_id = self.settings.winner_guild_id
-        if target_guild_id is None or member.guild.id != target_guild_id:
-            return
         if self.user and member.id == self.user.id:
             return
-        if member.id == member.guild.owner_id or member.id in self.settings.winner_server_staff_ids:
+        if member.id == member.guild.owner_id or member.id in self._base_settings.winner_server_staff_ids:
             return
-
         try:
-            protected_id = await self.db.get_protected_user_id()
-            qualified = protected_id is not None and await self.db.is_qualified_winner(member.id, protected_id)
+            source_guild_ids = await self.db.get_source_guild_ids_for_destination(member.guild.id)
+            if not source_guild_ids:
+                return
+            qualified = await self.qualified_sources_for_destination(member.guild.id, member.id)
         except Exception:
-            # Fail closed: if qualification cannot be verified, do not leave a new member in the winners-only guild.
-            log.exception("Could not verify destination-guild joiner %s; rejecting the join", member.id)
-            protected_id = None
-            qualified = False
+            # Fail closed if the destination is actively configured as winners-only.
+            log.exception("Could not verify destination-guild joiner %s", member.id)
+            qualified = []
         if qualified:
-            await self.db.mark_winner_joined(member.id, protected_id)
-            log.info("Qualified protected-target winner %s joined winner guild %s", member.id, member.guild.id)
+            log.info(
+                "Qualified user %s joined winner guild %s via source guild(s) %s",
+                member.id,
+                member.guild.id,
+                [source_id for source_id, _ in qualified],
+            )
             return
 
         try:
-            await member.kick(reason="Winners-only server: this Discord account has not defeated the protected player.")
+            await member.kick(reason="Winners-only server: this Discord account has not defeated a configured protected player.")
             log.info("Removed non-qualified user %s from winner guild %s", member.id, member.guild.id)
         except discord.Forbidden:
             log.error("Could not remove non-qualified user %s from winner guild; check Kick Members and role position", member.id)
@@ -208,6 +319,13 @@ class BrawlChallengeBot(commands.Bot):
             confirmed_tag = normalize_tag(str(profile.get("tag") or canonical_tag))
             player_name = str(profile.get("name") or "Protected player")[:100]
             await self.db.set_protected_account(user_id, confirmed_tag, player_name)
+            if interaction.guild_id is not None:
+                current = await self.ensure_guild_settings(interaction.guild_id)
+                self._guild_settings[interaction.guild_id] = replace(
+                    current,
+                    protected_discord_id=user_id,
+                    protected_brawl_tag=confirmed_tag,
+                )
         except (ValueError, BrawlAPIError) as exc:
             await _send_ephemeral(interaction, str(exc))
             return
@@ -231,8 +349,6 @@ class BrawlChallengeBot(commands.Bot):
             await self._open_daily_event(now.date())
 
     def _register_app_commands(self) -> None:
-        guild = discord.Object(id=self.settings.guild_id)
-
         @app_commands.command(name="register", description="유효한 브롤 태그를 등록하고 바로 대회에 참가할 수 있게 합니다.")
         @app_commands.describe(tag="게임 프로필의 플레이어 태그 (#은 생략해도 됩니다)")
         async def register(interaction: discord.Interaction, tag: str) -> None:
@@ -346,7 +462,7 @@ class BrawlChallengeBot(commands.Bot):
                 tag=tag,
             )
 
-        @app_commands.command(name="configure_servers", description="메인·보조 서버와 모집/결과 채널을 개인 봇에 적용합니다.")
+        @app_commands.command(name="configure_servers", description="현재 메인 서버의 대회 채널과 승자 보조 서버를 설정합니다.")
         @app_commands.describe(
             main_guild_id="현재 명령을 실행하는 메인 서버 ID",
             queue_channel_id="참가 신청 패널을 올릴 메인 서버 채널 ID",
@@ -374,10 +490,10 @@ class BrawlChallengeBot(commands.Bot):
                 await _send_ephemeral(interaction, "서버 ID와 채널 ID는 양의 숫자로 입력해 주세요.")
                 return
             main_id, queue_id, result_id, destination_id, invite_id = (int(value.strip()) for value in raw_ids)
-            if main_id != interaction.guild.id or main_id != self.settings.guild_id:
+            if main_id != interaction.guild.id:
                 await _send_ephemeral(
                     interaction,
-                    "메인 서버 ID는 현재 명령을 실행한 서버 및 봇의 DISCORD_GUILD_ID와 일치해야 합니다.",
+                    "메인 서버 ID는 현재 `/configure_servers`를 실행한 서버의 ID와 일치해야 합니다.",
                 )
                 return
             if destination_id == main_id:
@@ -447,8 +563,9 @@ class BrawlChallengeBot(commands.Bot):
                 log.exception("Could not save main/secondary server configuration")
                 await _send_ephemeral(interaction, "서버 설정을 저장하지 못했습니다. 데이터베이스를 확인해 주세요.")
                 return
-            self.settings = replace(
+            self._guild_settings[main_id] = replace(
                 self.settings,
+                guild_id=main_id,
                 queue_channel_id=queue_id,
                 result_channel_id=result_id,
                 winner_guild_id=destination_id,
@@ -459,6 +576,60 @@ class BrawlChallengeBot(commands.Bot):
                 f"서버 설정을 저장했습니다. 메인 서버: **{interaction.guild.name}** (`{main_id}`), 보조 서버 ID: `{destination_id}`. "
                 "모집/결과 채널과 초대 채널 설정은 재시작 후에도 유지됩니다.",
             )
+
+        @app_commands.command(name="set_auto_ban", description="이 서버에서 대회 자동 영구 밴을 켜거나 끕니다.")
+        @app_commands.describe(
+            enabled="True이면 확정 패배자를 영구 밴하고 ID/태그 차단 목록에 추가합니다.",
+            confirm="자동 영구 밴을 켤 때만 True로 설정합니다.",
+        )
+        @app_commands.default_permissions(administrator=True)
+        async def set_auto_ban(interaction: discord.Interaction, enabled: bool, confirm: bool = False) -> None:
+            if not _is_admin(interaction):
+                await _send_ephemeral(interaction, "이 명령은 서버 관리자만 사용할 수 있습니다.")
+                return
+            if interaction.guild is None:
+                await _send_ephemeral(interaction, "Discord 서버 안에서만 사용할 수 있습니다.")
+                return
+            if enabled and not confirm:
+                await _send_ephemeral(
+                    interaction,
+                    "확정된 패배자를 이 서버에서 영구 밴하고 Brawl 태그도 대회 차단 목록에 추가합니다. "
+                    "진행 중 이벤트가 없고 보호 대상 설정이 끝났는지 확인한 뒤 `confirm:true`로 실행해 주세요.",
+                )
+                return
+            if enabled and self._base_settings.dry_run:
+                await _send_ephemeral(
+                    interaction,
+                    "봇 운영자의 전역 안전 잠금 `DRY_RUN=true`가 켜져 있어 밴을 활성화할 수 없습니다. "
+                    "운영자가 로컬 `.env`에서 `DRY_RUN=false`로 바꾸고 봇을 재시작한 뒤 다시 실행해야 합니다.",
+                )
+                return
+            if enabled:
+                if await self.db.get_active_event() is not None:
+                    await _send_ephemeral(interaction, "진행 중인 이벤트가 있습니다. 이벤트가 끝나거나 취소된 뒤 자동 밴을 켜 주세요.")
+                    return
+                bot_member = interaction.guild.me
+                if bot_member is None or not bot_member.guild_permissions.ban_members:
+                    await _send_ephemeral(interaction, "봇에 이 서버의 Ban Members 권한이 필요합니다.")
+                    return
+                if await self.db.get_protected_user_id() is None or await self.db.get_protected_brawl_tag() is None:
+                    await _send_ephemeral(interaction, "먼저 `/set_protected` 또는 `/set_protected_id`로 보호 대상을 설정해 주세요.")
+                    return
+            try:
+                await self.db.set_auto_ban_enabled(enabled)
+            except Exception:
+                log.exception("Could not update automatic-ban setting for guild %s", interaction.guild.id)
+                await _send_ephemeral(interaction, "자동 밴 설정을 저장하지 못했습니다.")
+                return
+            current = await self.ensure_guild_settings(interaction.guild.id)
+            self._guild_settings[interaction.guild.id] = replace(
+                current,
+                dry_run=self._base_settings.dry_run or not enabled,
+            )
+            if enabled:
+                await _send_ephemeral(interaction, "이 서버에서 자동 영구 밴을 켰습니다. 명확한 Bounty 1대1 결과에만 적용됩니다.")
+            else:
+                await _send_ephemeral(interaction, "이 서버는 시험 모드입니다. 결과는 기록하지만 실제 Discord 밴과 태그 차단은 실행하지 않습니다.")
 
         @app_commands.command(name="set_winner_server", description="보호 대상을 이긴 참가자가 초대를 받을 보조 서버를 설정합니다.")
         @app_commands.describe(
@@ -511,11 +682,12 @@ class BrawlChallengeBot(commands.Bot):
             except ValueError as exc:
                 await _send_ephemeral(interaction, str(exc))
                 return
-            self.settings = replace(
-                self.settings,
-                winner_guild_id=target_guild_id,
-                winner_invite_channel_id=target_channel_id,
-            )
+            if self.settings.guild_id is not None:
+                self._guild_settings[self.settings.guild_id] = replace(
+                    self.settings,
+                    winner_guild_id=target_guild_id,
+                    winner_invite_channel_id=target_channel_id,
+                )
             await _send_ephemeral(
                 interaction,
                 f"보조 서버를 **{target_guild.name}** (`{target_guild_id}`)로 설정했습니다. "
@@ -805,7 +977,7 @@ class BrawlChallengeBot(commands.Bot):
                 if member.id == target_guild.owner_id or member.id in self.settings.winner_server_staff_ids:
                     kept += 1
                     continue
-                if protected_id is not None and await self.db.is_qualified_winner(member.id, protected_id):
+                if await self.qualified_sources_for_destination(target_guild.id, member.id):
                     kept += 1
                     continue
                 try:
@@ -824,6 +996,7 @@ class BrawlChallengeBot(commands.Bot):
             set_protected,
             set_protected_id,
             configure_servers,
+            set_auto_ban,
             set_winner_server,
             phone_verification_status,
             enable_phone_verification,
@@ -836,7 +1009,7 @@ class BrawlChallengeBot(commands.Bot):
             audit_winner_server,
         )
         for command in commands_to_add:
-            self.tree.add_command(command, guild=guild)
+            self.tree.add_command(command)
 
     async def _fetch_channel(self, channel_id: int) -> Any:
         channel = self.get_channel(channel_id)
@@ -966,37 +1139,58 @@ class BrawlChallengeBot(commands.Bot):
 
     async def _daily_scheduler(self) -> None:
         await self.wait_until_ready()
-        zone = self.settings.time_zone
-        now = datetime.now(zone)
-        scheduled_today = datetime.combine(
-            now.date(),
-            time(self.settings.daily_open_hour, self.settings.daily_open_minute),
-            tzinfo=zone,
-        )
-        # If the process starts after today's scheduled time, try to create
-        # today's event once instead of silently waiting until tomorrow.
-        if now >= scheduled_today:
-            await self._open_daily_event(now.date())
-
+        zone = self._base_settings.time_zone
         while not self.is_closed():
             now = datetime.now(zone)
-            target = datetime.combine(
-                now.date(),
-                time(self.settings.daily_open_hour, self.settings.daily_open_minute),
+            today = now.date()
+            scheduled_today = datetime.combine(
+                today,
+                time(self._base_settings.daily_open_hour, self._base_settings.daily_open_minute),
                 tzinfo=zone,
             )
-            if target <= now:
-                target += timedelta(days=1)
-            await asyncio.sleep(max(1.0, (target - now).total_seconds()))
-            await self._open_daily_event(datetime.now(zone).date())
+            if now >= scheduled_today:
+                try:
+                    guild_ids = await self.db.get_configured_guild_ids()
+                except Exception:
+                    log.exception("Could not enumerate configured guilds for the daily scheduler")
+                    guild_ids = []
+                for guild_id in guild_ids:
+                    if self.get_guild(guild_id) is None or self._daily_attempted.get(guild_id) == today:
+                        continue
+                    settings = await self.ensure_guild_settings(guild_id)
+                    if settings.queue_channel_id is None or settings.result_channel_id is None:
+                        continue
+                    with self.db.guild_context(guild_id):
+                        try:
+                            await self._open_daily_event(today)
+                        except Exception:
+                            log.exception("Could not open daily event for guild %s", guild_id)
+                    self._daily_attempted[guild_id] = today
+
+            now = datetime.now(zone)
+            next_target = datetime.combine(
+                now.date(),
+                time(self._base_settings.daily_open_hour, self._base_settings.daily_open_minute),
+                tzinfo=zone,
+            )
+            if next_target <= now:
+                next_target += timedelta(days=1)
+            # Re-check periodically so a newly configured guild is picked up without a restart.
+            await asyncio.sleep(max(1.0, min(60.0, (next_target - now).total_seconds())))
 
     async def _open_daily_event(self, event_date: date) -> None:
-        event_key = f"daily-{event_date.isoformat()}"
+        guild_id = self.settings.guild_id
+        if guild_id is None or self.settings.result_channel_id is None:
+            return
+        event_key = f"daily-{guild_id}-{event_date.isoformat()}"
         if await self.db.get_event_by_key(event_key):
+            return
+        legacy_event = await self.db.get_event_by_key(f"daily-{event_date.isoformat()}")
+        if legacy_event and int(legacy_event.get("guild_id", 0)) == guild_id:
             return
         cancelled = await self.db.cancel_stale_open_events(event_date.isoformat())
         for event_id in cancelled:
-            log.info("Cancelled stale open queue %s", event_id)
+            log.info("Cancelled stale open queue %s for guild %s", event_id, guild_id)
 
         active = await self.db.get_active_event()
         if active:
@@ -1022,32 +1216,44 @@ class BrawlChallengeBot(commands.Bot):
                 content=f"오늘 모집을 열지 않았습니다: {exc}",
             )
         except Exception:
-            log.exception("Could not create daily event for %s", event_date.isoformat())
+            log.exception("Could not create daily event for guild %s on %s", guild_id, event_date.isoformat())
 
     async def _match_poller(self) -> None:
         await self.wait_until_ready()
         while not self.is_closed():
             try:
-                # Resume any result that was persisted just before a process restart.
-                for pending in await self.db.get_pending_ban_matches():
-                    await self.process_pending_match(int(pending["id"]))
-                protected_id = await self.db.get_protected_user_id()
-                if self.settings.winner_guild_id is not None and protected_id is not None:
-                    for qualified in await self.db.get_pending_winner_invites(protected_id):
-                        await self.send_winner_invite(int(qualified["user_id"]), protected_id)
-                await self._poll_active_matches()
+                guild_ids = await self.db.get_configured_guild_ids()
+                active_matches: list[dict[str, Any]] = []
+                for guild_id in guild_ids:
+                    if self.get_guild(guild_id) is None:
+                        continue
+                    await self.ensure_guild_settings(guild_id)
+                    with self.db.guild_context(guild_id):
+                        for pending in await self.db.get_pending_ban_matches():
+                            await self.process_pending_match(int(pending["id"]))
+                        protected_id = await self.db.get_protected_user_id()
+                        if self.settings.winner_guild_id is not None and protected_id is not None:
+                            for qualified in await self.db.get_pending_winner_invites(protected_id):
+                                await self.send_winner_invite(int(qualified["user_id"]), protected_id)
+                        active_matches.extend(await self.db.get_active_matches())
+                await self._poll_active_matches(active_matches)
             except asyncio.CancelledError:
                 raise
             except Exception:
                 log.exception("Unexpected error in battle-log poller")
-            await asyncio.sleep(self.settings.match_poll_seconds)
+            await asyncio.sleep(self._base_settings.match_poll_seconds)
 
-    async def _poll_active_matches(self) -> None:
-        matches = await self.db.get_active_matches()
+    async def _poll_active_matches(self, matches: list[dict[str, Any]] | None = None) -> None:
+        if matches is None:
+            matches = []
+            for guild_id in await self.db.get_configured_guild_ids():
+                await self.ensure_guild_settings(guild_id)
+                with self.db.guild_context(guild_id):
+                    matches.extend(await self.db.get_active_matches())
         if not matches:
             return
 
-        tags = sorted({str(match[key]) for match in matches for key in ("tag1", "tag2")})
+        tags = sorted({normalize_tag(str(match[key])) for match in matches for key in ("tag1", "tag2")})
         semaphore = asyncio.Semaphore(3)
         logs_by_tag: dict[str, list[dict[str, Any]]] = {}
 
@@ -1063,44 +1269,47 @@ class BrawlChallengeBot(commands.Bot):
         await asyncio.gather(*(fetch_log(tag) for tag in tags))
 
         for match in matches:
-            tag1 = str(match["tag1"])
-            tag2 = str(match["tag2"])
-            if tag1 not in logs_by_tag or tag2 not in logs_by_tag:
-                continue
-            ignored = await self.db.get_ignored_battle_keys(int(match["id"]))
-            decision = evaluate_pair_logs(
-                tag1,
-                tag2,
-                logs_by_tag[tag1],
-                logs_by_tag[tag2],
-                started_at=str(match["started_at"]),
-                allowed_modes=self.settings.allowed_modes,
-                ignored_battle_keys=ignored,
-            )
-            if decision is None:
-                continue
-            if decision.kind == "draw":
-                await self.db.ignore_battle(int(match["id"]), decision.battle_key, "draw")
-                await self._announce_draw(match, decision)
-                continue
-            if decision.kind != "decisive" or not decision.winner_tag or not decision.loser_tag:
-                continue
+            guild_id = int(match["guild_id"])
+            await self.ensure_guild_settings(guild_id)
+            with self.db.guild_context(guild_id):
+                tag1 = normalize_tag(str(match["tag1"]))
+                tag2 = normalize_tag(str(match["tag2"]))
+                if tag1 not in logs_by_tag or tag2 not in logs_by_tag:
+                    continue
+                ignored = await self.db.get_ignored_battle_keys(int(match["id"]))
+                decision = evaluate_pair_logs(
+                    tag1,
+                    tag2,
+                    logs_by_tag[tag1],
+                    logs_by_tag[tag2],
+                    started_at=str(match["started_at"]),
+                    allowed_modes=self.settings.allowed_modes,
+                    ignored_battle_keys=ignored,
+                )
+                if decision is None:
+                    continue
+                if decision.kind == "draw":
+                    await self.db.ignore_battle(int(match["id"]), decision.battle_key, "draw")
+                    await self._announce_draw(match, decision)
+                    continue
+                if decision.kind != "decisive" or not decision.winner_tag or not decision.loser_tag:
+                    continue
 
-            tag_to_user = {normalize_tag(tag1): int(match["player1_user_id"]), normalize_tag(tag2): int(match["player2_user_id"])}
-            winner_id = tag_to_user.get(normalize_tag(decision.winner_tag))
-            loser_id = tag_to_user.get(normalize_tag(decision.loser_tag))
-            if winner_id is None or loser_id is None or winner_id == loser_id:
-                log.error("Could not map API decision to participants for match %s", match["id"])
-                continue
-            accepted = await self.db.mark_pending_ban(
-                int(match["id"]),
-                winner_user_id=winner_id,
-                loser_user_id=loser_id,
-                battle_key_value=decision.battle_key,
-                result_kind="api",
-            )
-            if accepted:
-                await self.process_pending_match(int(match["id"]), decision=decision)
+                tag_to_user = {tag1: int(match["player1_user_id"]), tag2: int(match["player2_user_id"])}
+                winner_id = tag_to_user.get(normalize_tag(decision.winner_tag))
+                loser_id = tag_to_user.get(normalize_tag(decision.loser_tag))
+                if winner_id is None or loser_id is None or winner_id == loser_id:
+                    log.error("Could not map API decision to participants for match %s", match["id"])
+                    continue
+                accepted = await self.db.mark_pending_ban(
+                    int(match["id"]),
+                    winner_user_id=winner_id,
+                    loser_user_id=loser_id,
+                    battle_key_value=decision.battle_key,
+                    result_kind="api",
+                )
+                if accepted:
+                    await self.process_pending_match(int(match["id"]), decision=decision)
 
     async def _announce_draw(self, match: dict[str, Any], decision: BattleDecision) -> None:
         await self._send_to_channel(

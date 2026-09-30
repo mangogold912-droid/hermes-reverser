@@ -20,6 +20,18 @@ class ConfigTests(unittest.TestCase):
         with patch("brawl_bot.config.load_dotenv"), patch.dict(os.environ, env, clear=True):
             return load_settings()
 
+    def test_public_install_can_start_without_a_fixed_guild_or_channel(self):
+        settings = self.load_from({"DISCORD_GUILD_ID": "", "QUEUE_CHANNEL_ID": "", "RESULT_CHANNEL_ID": ""})
+        self.assertIsNone(settings.guild_id)
+        self.assertIsNone(settings.queue_channel_id)
+        self.assertIsNone(settings.result_channel_id)
+
+    def test_legacy_bootstrap_guild_and_queue_channel_must_be_set_together(self):
+        with self.assertRaisesRegex(ValueError, "Set both DISCORD_GUILD_ID"):
+            self.load_from({"DISCORD_GUILD_ID": "", "QUEUE_CHANNEL_ID": "223456789012345678"})
+        with self.assertRaisesRegex(ValueError, "Set both DISCORD_GUILD_ID"):
+            self.load_from({"DISCORD_GUILD_ID": "123456789012345678", "QUEUE_CHANNEL_ID": ""})
+
     def test_defaults_to_bounty_only_and_ten_second_poll(self):
         settings = self.load_from()
         self.assertEqual(settings.allowed_modes, ("bounty",))
@@ -42,6 +54,17 @@ class ConfigTests(unittest.TestCase):
             }
         )
         self.assertEqual(settings.protected_brawl_tag, "#2YJPJ2Q0")
+
+    def test_legacy_per_guild_environment_defaults_require_a_legacy_guild_id(self):
+        with self.assertRaisesRegex(ValueError, "legacy DISCORD_GUILD_ID"):
+            self.load_from(
+                {
+                    "DISCORD_GUILD_ID": "",
+                    "QUEUE_CHANNEL_ID": "",
+                    "PROTECTED_DISCORD_ID": "323456789012345678",
+                    "PROTECTED_BRAWL_TAG": "2YJPJ2Q0",
+                }
+            )
 
     def test_destination_server_and_invite_channel_must_be_configured_together(self):
         with self.assertRaisesRegex(ValueError, "WINNER_INVITE_CHANNEL_ID is required"):
