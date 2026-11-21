@@ -78,7 +78,7 @@ internal fun CountryRoutingRow(
         )
         Spacer(modifier = Modifier.height(3.dp))
         Text(
-            text = "Tap a country to connect or switch to its lowest plausible reported-ping relay; retries stay there. Use Brawl Stars Direct Route below to keep the game off the changing VPN route.",
+            text = "Country taps choose the lowest plausible reported-ping relay. A relay switch restarts OpenVPN and may disconnect Brawl Stars. Direct Route sends the game outside the VPN; it cannot preserve a VPN-routed game session.",
             style = TechnicalData.copy(fontSize = 10.sp),
             color = TextMuted,
             maxLines = 2,
