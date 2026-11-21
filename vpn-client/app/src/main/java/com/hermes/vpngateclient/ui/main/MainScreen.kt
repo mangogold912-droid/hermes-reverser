@@ -174,7 +174,11 @@ fun MainScreen(
                     )
                     1 -> ServersTabContent(
                         viewModel = viewModel,
-                        onServerSelected = stableOnServerSelected
+                        onServerSelected = stableOnServerSelected,
+                        onCountrySelected = { country ->
+                            selectedTab = 0
+                            viewModel.selectCountryForRouting(country, onConnectClicked)
+                        }
                     )
                     2 -> LogsTabContent(
                         viewModel = viewModel
@@ -206,6 +210,12 @@ fun MainScreen(
                         }
                         viewModel.onServerSwitchRequested(fullServer, onConnectClicked)
                     }
+                },
+                onCountrySelected = { country ->
+                    coroutineScope.launch { sheetState.hide() }.invokeOnCompletion {
+                        showServerExplorer = false
+                    }
+                    viewModel.selectCountryForRouting(country, onConnectClicked)
                 }
             )
         }
@@ -462,7 +472,8 @@ private fun ServerExplorerSheet(
     viewModel: VpnViewModel,
     sheetState: SheetState,
     onDismiss: () -> Unit,
-    onServerSelected: (VpnServerDisplay) -> Unit
+    onServerSelected: (VpnServerDisplay) -> Unit,
+    onCountrySelected: (String) -> Unit
 ) {
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -552,6 +563,12 @@ private fun ServerExplorerSheet(
 
             Spacer(modifier = Modifier.height(12.dp))
 
+            CountryRoutingRow(
+                viewModel = viewModel,
+                onCountrySelected = onCountrySelected
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+
             // Server List — deliberately uses the tab-independent quick-change list,
             // NOT filteredServers (which carries Servers-tab filters).
             if (viewModel.quickChangeServers.isEmpty()) {
@@ -603,6 +620,7 @@ private fun QuickServerItem(
 ) {
     // Sub-15ms reports are implausible for an internet relay — suspect data.
     val pingColor = when {
+        server.ping <= 0 -> TextMuted
         server.ping < 15 -> Color(0xFFFFB300)
         server.ping < 60 -> Color(0xFF00E676)
         server.ping < 120 -> Color(0xFF00E5FF)

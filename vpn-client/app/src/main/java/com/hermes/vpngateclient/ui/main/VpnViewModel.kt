@@ -12,6 +12,7 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.hermes.vpngateclient.data.model.VpnServer
+import com.hermes.vpngateclient.data.model.ServerSelection
 import com.hermes.vpngateclient.data.model.VpnServerDisplay
 import com.hermes.vpngateclient.data.model.toDisplay
 import com.hermes.vpngateclient.data.remote.VpnGateResult
@@ -57,6 +58,8 @@ data class LogEntry(
     val event: String,
     val detail: String
 )
+
+private fun VpnServer.pingLabel(): String = if (ping > 0) "${ping}ms" else "—"
 
 class VpnViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -121,8 +124,12 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
     /** Search query filter. */
     var searchQuery by mutableStateOf("")
 
-    /** Selected country filter. */
+    /** Selected country filter on the full server list. */
     var selectedCountryFilter by mutableStateOf<String?>(null)
+
+    /** Country lock used by country-auto mode; relay failover stays within this country. */
+    var preferredCountry by mutableStateOf<String?>(null)
+        private set
 
     /**
      * Residential-only view: show just the hosts most likely to be a volunteer's
@@ -163,21 +170,38 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         }
         when (activeSort) {
             SortCriteria.SCORE -> list.sortedByDescending { it.score }
-            SortCriteria.PING -> list.sortedBy { it.ping }
+            SortCriteria.PING -> list.sortedWith(
+                compareBy<VpnServerDisplay> {
+                    when (it.ping) {
+                        in 15..600 -> 0
+                        in 1..600 -> 1
+                        else -> 2
+                    }
+                }.thenBy { it.ping.takeIf { ping -> ping in 1..600 } ?: Int.MAX_VALUE }
+            )
             SortCriteria.SPEED -> list.sortedByDescending { it.speed }
             SortCriteria.SESSIONS -> list.sortedByDescending { it.numVpnSessions }
             SortCriteria.OVERALL -> list.sortedByDescending { it.overallRankScore }
         }
     }
 
-    /** List of all unique available countries for filtering. */
+    /** All countries represented by valid directory profiles; put the US first. */
     val availableCountries by derivedStateOf {
-        displayServers.map { it.countryLong }.distinct().sorted()
+        val countries = displayServers.map { it.countryLong }.distinct()
+        val usName = displayServers.firstOrNull { it.countryShort.equals("US", ignoreCase = true) }?.countryLong
+        countries.sortedWith(compareBy<String> { if (it == usName) 0 else 1 }.thenBy { it })
     }
 
-    /** Country → server count for display badges. */
+    /** Country → count of every usable relay profile in the current public feed. */
     val countryServerCounts by derivedStateOf {
         displayServers.groupingBy { it.countryLong }.eachCount()
+    }
+
+    /** Country → best available directory-reported ping, with quality as fallback. */
+    val bestPingServersByCountry by derivedStateOf {
+        displayServers.groupBy { it.countryLong }.mapNotNull { (country, servers) ->
+            ServerSelection.bestPingDisplay(servers)?.let { country to it }
+        }.toMap()
     }
 
     /**
@@ -366,15 +390,23 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
 
         val failedServer = selectedServer
         failedServer?.ip?.let(attemptedRelayIps::add)
-        val nextServer = fullServers
-            .asSequence()
-            .filterNot { it.ip in attemptedRelayIps }
-            .maxByOrNull { it.score }
+        val relayPool = preferredCountry?.let { country ->
+            fullServers.filter { it.countryLong.equals(country, ignoreCase = true) }
+        } ?: fullServers
+        val untriedRelays = relayPool.filterNot { it.ip in attemptedRelayIps }
+        val nextServer = if (preferredCountry != null) {
+            // Country-auto mode advances to the next-lowest reported latency within
+            // that country rather than silently falling back to another location.
+            ServerSelection.bestPingServer(untriedRelays)
+        } else {
+            untriedRelays.maxByOrNull { it.score }
+        }
         if (nextServer == null) {
+            val scope = preferredCountry?.let { " in $it" } ?: ""
             failConnection(
                 headline,
                 detail,
-                "$dropLogLine No untried relay remains. Gave up after ${connectAttempts + 1} attempt(s)."
+                "$dropLogLine No untried relay remains$scope. Gave up after ${connectAttempts + 1} attempt(s)."
             )
             return
         }
@@ -410,7 +442,11 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
                 beginAttempt()
                 addLog("CONNECT", "Launching attempt ${attempt + 1} → ${selectedServer?.ip ?: "?"}...")
                 if (!vpnManager.startVpn(config)) {
-                    failConnection(headline, detail, "Relay attempt ${attempt + 1} failed to launch.")
+                    scheduleConnectRetry(
+                        headline,
+                        detail,
+                        "Relay attempt ${attempt + 1} failed to launch."
+                    )
                 }
             }
         }
@@ -448,6 +484,17 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
                     vpnManager.stopVpn()
                     return
                 }
+                if (activeIntent in listOf(
+                        ConnectionIntent.SWITCH,
+                        ConnectionIntent.RESUME_FROM_PAUSE,
+                        ConnectionIntent.AUTO_RETRY
+                    ) && !attemptSawProgress
+                ) {
+                    // A CONNECTED replay from the previous profile can race the new
+                    // service start. The replacement attempt must report progress first.
+                    addLog("IGNORED", "Connected event before first progress of the replacement attempt.")
+                    return
+                }
                 val wasRetrying = connectAttempts > 0 || activeIntent == ConnectionIntent.AUTO_RETRY
                 transitionTo(ConnectionState.CONNECTED, "handshake complete ($state)")
                 vpnStatus = "Connected · ${selectedServer?.countryLong ?: "Gateway"}"
@@ -468,9 +515,8 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
                 ) || connectionState == ConnectionState.CONNECTING ||
                         connectionState == ConnectionState.RECONNECTING
                 if (!attemptInProgress) return
-                // While the switch settle delay is running, NOTHING has been launched
-                // yet — any progress event here belongs to the dying previous session
-                // and must not mark this attempt as started nor cancel the launch.
+                // Before the replacement request is dispatched, a progress event can
+                // only belong to the still-running old profile; don't adopt it as new.
                 if (switchLaunchJob?.isActive == true) return
                 // This attempt is demonstrably alive — a teardown from now on is
                 // ITS failure, not a previous session's goodbye.
@@ -695,16 +741,41 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
                         "(${result.duplicatesRemoved} duplicate rows skipped). Active tunnel preserved."
             )
         } else {
-            if (selectedServer == null || currentInFetched == null) {
-                val best = fetched.maxByOrNull { it.score } ?: fetched.first()
-                selectedServer = best
-                bestServerConfig = best.openVpnConfigDataBase64
-                isAutoSelectedBest = true
-            } else {
-                selectedServer = currentInFetched
-                bestServerConfig = currentInFetched.openVpnConfigDataBase64
-                val topScore = fetched.maxOfOrNull { it.score } ?: 0L
-                isAutoSelectedBest = (selectedServer?.score == topScore)
+            val countryBest = preferredCountry?.let { country ->
+                ServerSelection.bestPingServer(
+                    fetched.filter { it.countryLong.equals(country, ignoreCase = true) }
+                )
+            }
+            when {
+                countryBest != null -> {
+                    // While offline, refreshes may update the pending route to a newly
+                    // reported lower-ping relay. Never rotate an active game session.
+                    selectedServer = countryBest
+                    bestServerConfig = countryBest.openVpnConfigDataBase64
+                    val topScore = fetched.maxOfOrNull { it.score } ?: 0L
+                    isAutoSelectedBest = countryBest.score == topScore
+                }
+                preferredCountry != null -> {
+                    // Keep the country lock and last usable profile; do not silently
+                    // route to a different country just because this feed omitted it.
+                    if (currentInFetched?.countryLong?.equals(preferredCountry, ignoreCase = true) == true) {
+                        selectedServer = currentInFetched
+                        bestServerConfig = currentInFetched.openVpnConfigDataBase64
+                    }
+                    addLog("COUNTRY", "No current directory relay found for locked country $preferredCountry; keeping the country lock.")
+                }
+                selectedServer == null || currentInFetched == null -> {
+                    val best = fetched.maxByOrNull { it.score } ?: fetched.first()
+                    selectedServer = best
+                    bestServerConfig = best.openVpnConfigDataBase64
+                    isAutoSelectedBest = true
+                }
+                else -> {
+                    selectedServer = currentInFetched
+                    bestServerConfig = currentInFetched.openVpnConfigDataBase64
+                    val topScore = fetched.maxOfOrNull { it.score } ?: 0L
+                    isAutoSelectedBest = currentInFetched.score == topScore
+                }
             }
             // A successful fetch resolves both the initial search and a prior
             // fetch-error state (e.g. the Servers-tab retry path).
@@ -721,7 +792,7 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         addLog(
             "READY",
             "${fetched.size} usable nodes analyzed in ${fetchDurationMs}ms " +
-                    "(top pick: ${best?.countryLong ?: "?"} · ${best?.ping ?: "?"}ms). Directory updated."
+                    "(top pick: ${best?.countryLong ?: "?"} · ${best?.pingText ?: "—"}). Directory updated."
         )
     }
 
@@ -749,6 +820,40 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
     /** Retrieve the full VpnServer (with config) by IP. Used only on tap. */
     fun getFullServer(ip: String): VpnServer? = serverLookup[ip]
 
+    /**
+     * Select a country route, choosing the lowest plausible directory-reported ping.
+     * When already connected, the normal fast-replacement path switches to that relay;
+     * later automatic retries stay within the selected country.
+     */
+    fun selectCountryForRouting(country: String, onStartConnection: (String) -> Unit) {
+        val countryServers = fullServers.filter { it.countryLong.equals(country, ignoreCase = true) }
+        val best = ServerSelection.bestPingServer(countryServers)
+        if (best == null) {
+            addLog("COUNTRY", "No usable VPN Gate relays are currently listed for $country.")
+            return
+        }
+
+        val shouldStartTunnel = connectionState in listOf(
+            ConnectionState.IDLE,
+            ConnectionState.DISCONNECTED,
+            ConnectionState.ERROR
+        )
+        addLog(
+            "COUNTRY",
+            "Country route set to ${best.countryLong}; selected lowest plausible directory ping " +
+                    "${best.pingLabel()} from ${countryServers.size} listed relays."
+        )
+        onServerSwitchRequested(best, onStartConnection, preferredCountry = best.countryLong)
+
+        // A country tap is a direct connect action when no tunnel is running; during
+        // an active/paused attempt the switch path above handles replacement instead.
+        if (shouldStartTunnel && connectionState in listOf(ConnectionState.IDLE, ConnectionState.DISCONNECTED)) {
+            val config = bestServerConfig ?: return
+            onConnectRequested()
+            onStartConnection(config)
+        }
+    }
+
     fun selectServer(server: VpnServer) {
         selectedServer = server
         attemptedRelayIps.clear()
@@ -773,7 +878,7 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         vpnStatus = "Selected: ${server.countryLong} (${server.ip})"
-        addLog("SELECT", "${server.countryLong} (${server.ip}) — ${server.ping}ms")
+        addLog("SELECT", "${server.countryLong} (${server.ip}) — ${server.pingLabel()}")
     }
 
     fun setSortCriteria(sort: SortCriteria) {
@@ -781,10 +886,15 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Dedicated first-class action to switch servers seamlessly,
-     * whether currently CONNECTED, CONNECTING, RECONNECTING, PAUSED, or IDLE.
+     * Switches relay with minimal deliberate downtime. A non-null country lock keeps
+     * both the initial pick and subsequent automatic failover inside that country.
      */
-    fun onServerSwitchRequested(newServer: VpnServer, onStartConnection: (String) -> Unit) {
+    fun onServerSwitchRequested(
+        newServer: VpnServer,
+        onStartConnection: (String) -> Unit,
+        preferredCountry: String? = null
+    ) {
+        this.preferredCountry = preferredCountry
         val wasActive = (connectionState == ConnectionState.CONNECTED ||
                 connectionState == ConnectionState.CONNECTING ||
                 connectionState == ConnectionState.RECONNECTING ||
@@ -810,18 +920,18 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
             totalSessionMb = 0f
             stopTelemetry()
 
-            // Phase 1 — tear down whatever is running. Its exit events land while the
-            // SWITCH intent still owns them, so they can never read as a new failure.
-            addLog("SWITCH", "Disconnecting current gateway ($previousIp)...")
-            vpnManager.stopVpn()
-
-            attemptLabel = "CHANGING SERVER → ${newServer.countryLong.uppercase()}..."
-            transitionTo(ConnectionState.CONNECTING, "user switch → ${newServer.ip}")
+            // Keep the current route until OpenVPNService replaces its profile; an
+            // explicit stop + multi-second wait needlessly interrupts every app.
+            addLog(
+                "SWITCH",
+                "Fast relay replacement requested: $previousIp → ${newServer.ip}. A brief network gap may occur."
+            )
+            attemptLabel = "FAST SWITCH → ${newServer.countryLong.uppercase()}..."
+            transitionTo(ConnectionState.CONNECTING, "fast relay switch → ${newServer.ip}")
             vpnStatus = "Switching to ${newServer.countryLong}..."
 
-            // Phase 2 — launch the new gateway only after the old daemon has died.
             switchLaunchJob = viewModelScope.launch {
-                delay(SWITCH_SETTLE_MS)
+                delay(FAST_SWITCH_DELAY_MS)
                 if (connectionState != ConnectionState.CONNECTING ||
                     activeIntent != ConnectionIntent.SWITCH
                 ) {
@@ -830,8 +940,11 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
                 beginAttempt()
                 addLog(
                     "SWITCH",
-                    "Connecting new gateway → ${newServer.countryLong} (${newServer.ip}) · ${newServer.ping}ms · ${newServer.numVpnSessions} sessions..."
+                    "Replacing relay → ${newServer.countryLong} (${newServer.ip}) · ${newServer.pingLabel()} · ${newServer.numVpnSessions} sessions..."
                 )
+                // The library's replace-running start path tears down the old process
+                // as it starts the new profile; do not pre-stop the active tunnel.
+                switchLaunchJob = null
                 onStartConnection(newServer.openVpnConfigDataBase64)
             }
         }
@@ -891,17 +1004,27 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         vpnStatus = "Connecting to ${selectedServer?.countryLong ?: "Gateway"}..."
         addLog(
             "CONNECT",
-            "Initiating tunnel → ${selectedServer?.countryLong ?: "?"} (${selectedServer?.ip ?: "?"}) · ${selectedServer?.ping ?: "?"}ms..."
+            "Initiating tunnel → ${selectedServer?.countryLong ?: "?"} (${selectedServer?.ip ?: "?"}) · ${selectedServer?.pingLabel() ?: "—"}..."
         )
     }
 
-    /** Config parse/launch failed inside VpnManager — report immediately, don't wait out the watchdog. */
+    /** Config parse/launch failed inside VpnManager — advance to another untried relay immediately. */
     fun onLaunchFailed() {
-        failConnection(
-            "Failed to Start Tunnel",
-            "GateLink VPN could not launch the OpenVPN process for ${selectedServer?.ip ?: "the selected gateway"}. The server's configuration may be invalid.",
-            "Tunnel launch failed — configuration rejected. Please choose another server."
-        )
+        val headline = "Failed to Start Tunnel"
+        val detail = "GateLink VPN could not launch the OpenVPN process for ${selectedServer?.ip ?: "the selected gateway"}. The server's configuration may be invalid."
+        if (connectionState == ConnectionState.CONNECTING || connectionState == ConnectionState.RECONNECTING) {
+            scheduleConnectRetry(
+                headline,
+                detail,
+                "Tunnel launch failed — the selected profile was rejected."
+            )
+        } else {
+            failConnection(
+                headline,
+                detail,
+                "Tunnel launch failed — configuration rejected. Please choose another server."
+            )
+        }
     }
 
     /** The user denied (or dismissed) the system VPN permission dialog. */
@@ -1020,11 +1143,7 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         /** Wait between retry attempts — long enough to let the old process die cleanly. */
         private const val RETRY_BACKOFF_MS = 2_000L
 
-        /**
-         * After disconnecting one gateway, wait this long before launching the next so
-         * the old daemon's exit events land while SWITCH intent still owns them and can
-         * never be misread as the new server failing.
-         */
-        private const val SWITCH_SETTLE_MS = 2_000L
+        /** Avoid an extra UI-level wait; OpenVPNService performs the profile replacement itself. */
+        private const val FAST_SWITCH_DELAY_MS = 0L
     }
 }

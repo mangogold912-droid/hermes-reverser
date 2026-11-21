@@ -60,12 +60,55 @@ import com.hermes.vpngateclient.ui.util.formatScore
 import com.hermes.vpngateclient.ui.util.formatSpeed
 
 
+@Composable
+internal fun CountryRoutingRow(
+    viewModel: VpnViewModel,
+    onCountrySelected: (String) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val countries = viewModel.availableCountries
+    if (countries.isEmpty()) return
+
+    Column(modifier = modifier.fillMaxWidth()) {
+        Text(
+            text = "COUNTRY ROUTING · LOWEST REPORTED PING",
+            style = LabelCaps.copy(fontSize = 9.sp, fontWeight = FontWeight.Bold),
+            color = Primary
+        )
+        Spacer(modifier = Modifier.height(3.dp))
+        Text(
+            text = "Tap a country to connect or switch to its lowest plausible reported-ping relay; retries stay there. Switching may briefly interrupt games.",
+            style = TechnicalData.copy(fontSize = 10.sp),
+            color = TextMuted,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis
+        )
+        Spacer(modifier = Modifier.height(7.dp))
+        LazyRow(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            items(countries, key = { it }) { country ->
+                val best = viewModel.bestPingServersByCountry[country]
+                val count = viewModel.countryServerCounts[country] ?: 0
+                FilterChip(
+                    label = "${best?.flagEmoji ?: "🌐"} ${country.uppercase()} · ${best?.pingText ?: "—"} · $count",
+                    isSelected = viewModel.preferredCountry.equals(country, ignoreCase = true),
+                    onClick = { onCountrySelected(country) }
+                )
+            }
+        }
+    }
+}
+
+
 // ── Servers Tab Content ─────────────────────────────────────────────────────────
 
 @Composable
 fun ServersTabContent(
     viewModel: VpnViewModel,
-    onServerSelected: (VpnServerDisplay) -> Unit
+    onServerSelected: (VpnServerDisplay) -> Unit,
+    onCountrySelected: (String) -> Unit
 ) {
     val listState = rememberLazyListState()
 
@@ -165,7 +208,13 @@ fun ServersTabContent(
 
         Spacer(modifier = Modifier.height(12.dp))
 
-        // Country Filter Chips
+        CountryRoutingRow(
+            viewModel = viewModel,
+            onCountrySelected = onCountrySelected
+        )
+        Spacer(modifier = Modifier.height(12.dp))
+
+        // Country Filter Chips (browse only; route selection is the action above)
         if (viewModel.availableCountries.isNotEmpty()) {
             LazyRow(
                 modifier = Modifier.fillMaxWidth(),
@@ -333,6 +382,7 @@ private fun AdvancedServerCard(
     // Sub-15ms reports are physically implausible for an internet relay — treat
     // them as suspect data, not as a great latency.
     val pingColor = when {
+        server.ping <= 0 -> TextMuted
         server.ping < 15 -> Color(0xFFFFB300)
         server.ping < 60 -> Color(0xFF00E676)
         server.ping < 120 -> Color(0xFF00E5FF)

@@ -14,7 +14,9 @@ The app downloads the VPN Gate server directory, selects a recommended OpenVPN r
 
 VPN Gate relays are volunteered and operated by third parties. The relay operator may observe traffic metadata, and the VPN Gate project documents logging of relay-related metadata. Do not use this network for sensitive traffic or treat it as a private, no-logs service. Relay availability, speed, game latency, and session stability can change at any time; this app does not guarantee better Brawl Stars performance.
 
-The app fetches its public server directory from `https://www.vpngate.net/api/iphone/` and then connects directly to the selected volunteer relay. It does not include an account system or a developer-operated VPN gateway.
+The app fetches the public server directory from `https://www.vpngate.net/api/iphone/` and keeps every row with a usable OpenVPN profile; missing ping/speed telemetry does not hide a relay. The United States is surfaced first in country routing. Choosing a country starts a connection or switches an active tunnel to its lowest plausible **directory-reported** ping, then keeps automatic retries in that country. This is not a live latency measurement from the user's device, and the app cannot increase the number of volunteer relays VPN Gate actually publishes.
+
+Changing relays removes the app's extra stop-and-wait step and asks the OpenVPN service to replace its profile directly. The current single-process OpenVPN service stops the old process before starting the new one, so a brief tunnel/game interruption is still possible; seamless make-before-break handover is not supported or guaranteed. The app does not include an account system or a developer-operated VPN gateway.
 
 ## Build
 

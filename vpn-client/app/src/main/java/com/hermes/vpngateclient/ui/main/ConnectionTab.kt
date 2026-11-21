@@ -202,6 +202,7 @@ fun ConnectionTabContent(
             server = server,
             nodeCount = viewModel.displayServers.size,
             isBestServer = viewModel.isAutoSelectedBest,
+            preferredCountry = viewModel.preferredCountry,
             onClick = {
                 if (state != ConnectionState.SEARCHING_NODES) {
                     onShowServerExplorer()
@@ -701,6 +702,7 @@ private fun ServerCard(
     server: VpnServer?,
     nodeCount: Int,
     isBestServer: Boolean,
+    preferredCountry: String?,
     onClick: () -> Unit
 ) {
     val interactionSource = remember { MutableInteractionSource() }
@@ -820,8 +822,22 @@ private fun ServerCard(
                             modifier = Modifier.weight(1f, fill = false)
                         )
 
-                        // BEST SERVER badge (shown when it's the auto-selected best gateway)
-                        if (isBestServer) {
+                        // Distinguish a country-locked route from the global best-score pick.
+                        if (preferredCountry != null) {
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(4.dp))
+                                    .background(Color(0xFF111B26))
+                                    .border(1.dp, Primary.copy(alpha = 0.5f), RoundedCornerShape(4.dp))
+                                    .padding(horizontal = 6.dp, vertical = 2.dp)
+                            ) {
+                                Text(
+                                    text = "${preferredCountry.uppercase()} · AUTO",
+                                    style = LabelCaps.copy(fontSize = 8.sp, fontWeight = FontWeight.Bold),
+                                    color = Primary
+                                )
+                            }
+                        } else if (isBestServer) {
                             Box(
                                 modifier = Modifier
                                     .clip(RoundedCornerShape(4.dp))
@@ -907,9 +923,10 @@ private fun ServerCard(
                     )
                     Spacer(modifier = Modifier.height(1.dp))
                     Text(
-                        text = "${server.ping}ms",
+                        text = if (server.ping > 0) "${server.ping}ms" else "—",
                         style = TechnicalData.copy(fontSize = 12.sp, fontWeight = FontWeight.Medium),
                         color = when {
+                            server.ping <= 0 -> TextMuted
                             server.ping < 60 -> StatusSuccess
                             server.ping < 120 -> Color(0xFF00E5FF)
                             else -> Color(0xFFFFB300)

@@ -20,6 +20,7 @@ fun countryCodeToFlag(countryCode: String): String {
  * Example: 85_100_000 → "85.1 Mbps"
  */
 fun formatSpeed(bytesPerSec: Long): String {
+    if (bytesPerSec <= 0L) return "—"
     val mbps = bytesPerSec / 1_000_000.0
     return if (mbps >= 100) {
         "${mbps.toInt()} Mbps"

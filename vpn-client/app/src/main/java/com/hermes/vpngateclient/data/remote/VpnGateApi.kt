@@ -72,27 +72,26 @@ class VpnGateApi {
                 if (currentLine.startsWith("*") || currentLine.startsWith("#")) { continue }
                 val tokens = currentLine.split(",")
                 if (tokens.size >= 15) {
-                    val rawConfig = tokens.last().trim()
-                    // Strict OpenVPN filter: Must have a valid Base64 config
-                    if (rawConfig.length < 150) continue
+                    val rawConfig = tokens.last().trim().removeSurrounding("\"")
+                    // Keep every relay with a usable OpenVPN profile. Directory ping/speed
+                    // are optional telemetry; missing values must not hide live US relays.
+                    if (rawConfig.length < 64) continue
 
                     val ip = tokens[1].trim()
                     if (ip.isBlank()) continue
 
-                    val ping = tokens[3].toIntOrNull() ?: -1
-                    if (ping <= 0 || ping > 600) continue
-
-                    val speed = tokens[4].toLongOrNull() ?: 0L
-                    if (speed <= 0) continue
+                    // Zero means "not reported". It is shown as — and ranked below known pings.
+                    val ping = tokens[3].toIntOrNull()?.takeIf { it in 1..600 } ?: 0
+                    val speed = tokens[4].toLongOrNull()?.coerceAtLeast(0L) ?: 0L
 
                     val server = VpnServer(
-                        hostName = tokens[0],
+                        hostName = tokens[0].trim(),
                         ip = ip,
                         score = tokens[2].toLongOrNull() ?: 0L,
                         ping = ping,
                         speed = speed,
-                        countryLong = tokens[5],
-                        countryShort = tokens[6],
+                        countryLong = tokens[5].trim(),
+                        countryShort = tokens[6].trim(),
                         numVpnSessions = tokens[7].toLongOrNull() ?: 0L,
                         uptime = tokens[8].toLongOrNull() ?: 0L,
                         totalUsers = tokens[9].toLongOrNull() ?: 0L,

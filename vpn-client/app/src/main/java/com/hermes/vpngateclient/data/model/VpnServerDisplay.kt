@@ -22,7 +22,7 @@ data class VpnServerDisplay(
     val flagEmoji: String = countryCodeToFlag(countryShort),
     val formattedSpeed: String = formatSpeed(speed),
     val formattedScore: String = formatScore(score),
-    val pingText: String = "${ping}ms",
+    val pingText: String = if (ping > 0) "${ping}ms" else "—",
     val qualityScore: Float,
     val overallRankScore: Double,
     /** 0..1 likelihood this is a home connection rather than a datacenter. */
