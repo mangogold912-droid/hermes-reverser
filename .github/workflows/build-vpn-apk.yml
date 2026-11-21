@@ -26,8 +26,8 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v4.0.4
 
-      - name: Install Android SDK Platform 37
-        run: sdkmanager 'platforms;android-37' 'build-tools;36.0.0'
+      - name: Install Android SDK Platform 36
+        run: sdkmanager 'platforms;android-36' 'build-tools;36.0.0'
 
       - name: Run unit tests and build installable APK
         working-directory: vpn-client

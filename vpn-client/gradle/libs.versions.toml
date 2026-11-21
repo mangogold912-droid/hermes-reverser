@@ -1,6 +1,6 @@
 [versions]
 agp = "9.3.2"
-coreKtx = "1.19.0"
+coreKtx = "1.18.0"
 coreKtxVersion = "1.12.0"
 icsOpenvpnVersion = "0.7.38"
 junit = "4.13.2"
@@ -9,8 +9,8 @@ espressoCore = "3.7.0"
 kotlinxCoroutinesAndroid = "1.11.0"
 ktorClientAndroid = "3.5.2"
 ktorClientCore = "3.5.2"
-lifecycleRuntimeKtx = "2.11.0"
-activityCompose = "1.13.0"
+lifecycleRuntimeKtx = "2.10.0"
+activityCompose = "1.12.2"
 kotlin = "2.2.10"
 composeBom = "2026.02.01"
 

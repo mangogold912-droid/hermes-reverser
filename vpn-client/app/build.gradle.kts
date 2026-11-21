@@ -15,7 +15,7 @@ val keystoreProps = Properties().apply {
 android {
     namespace = "com.hermes.vpngateclient"
     compileSdk {
-        version = release(37)
+        version = release(36)
     }
 
     defaultConfig {
