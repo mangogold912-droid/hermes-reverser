@@ -18,7 +18,9 @@ The app fetches the public server directory from `https://www.vpngate.net/api/ip
 
 Changing relays removes the app's extra stop-and-wait step and asks the OpenVPN service to replace its profile directly. The current single-process OpenVPN service stops the old process before starting the new one, so a brief tunnel interruption is still possible; seamless make-before-break handover is not supported or guaranteed.
 
-The optional Brawl Stars Direct Route excludes `com.supercell.brawlstars` from the VPN on the next tunnel start, leaving the game on Android's current default network (cellular when that is the active network) while other apps use the VPN. This can keep a VPN relay switch from changing the game's route, but it does not accelerate or protect Brawl Stars through VPN Gate, does not force cellular when Wi-Fi is the system default, and cannot prevent carrier/game-server interruptions. Set the option before connecting and launching a match.
+The optional Brawl Stars Direct Route excludes `com.supercell.brawlstars` from the VPN on the next tunnel start, leaving the game on Android's current default network (cellular when that is the active network) while other apps use the VPN. It is off by default. The toggle saves a preference immediately, but the active tunnel keeps its existing route mode until it is disconnected and reconnected. Direct mode can keep a VPN relay switch from changing the game's route, but it does not accelerate or protect Brawl Stars through VPN Gate, does not force cellular when Wi-Fi is the system default, and cannot prevent carrier/game-server interruptions.
+
+The OpenVPN tunnel uses Android's current default underlying network (`setUnderlyingNetworks(null)`): Wi-Fi or cellular can carry the VPN when Android selects that network. This is not simultaneous Wi-Fi+cellular bonding. True multipath bonding requires a multipath transport and a compatible gateway under our control; VPN Gate's independent volunteer OpenVPN servers do not provide that shared endpoint or session migration.
 
 The app does not include an account system or a developer-operated VPN gateway.
 

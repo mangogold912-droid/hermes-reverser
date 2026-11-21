@@ -85,7 +85,7 @@ internal fun CountryRoutingRow(
             overflow = TextOverflow.Ellipsis
         )
         Spacer(modifier = Modifier.height(7.dp))
-        val canEditGameRoute = viewModel.connectionState !in listOf(
+        val gameRouteAppliesNextSession = viewModel.connectionState in listOf(
             ConnectionState.CONNECTED,
             ConnectionState.CONNECTING,
             ConnectionState.RECONNECTING,
@@ -107,15 +107,19 @@ internal fun CountryRoutingRow(
                     color = if (viewModel.brawlStarsDirectRoutingEnabled) Primary else TextMuted
                 )
                 Text(
-                    text = "On the next VPN connect, Brawl Stars uses Android's active network (cellular if selected), not VPN Gate. No VPN ping optimization or protection for the game.",
+                    text = if (viewModel.brawlStarsDirectRoutingEnabled) {
+                        "Next VPN session: game uses Android's active network (cellular if selected), not VPN Gate. No VPN acceleration/protection."
+                    } else {
+                        "Off: Brawl Stars uses the VPN route and may be interrupted by a relay switch."
+                    },
                     style = TechnicalData.copy(fontSize = 9.sp),
                     color = TextMuted,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis
                 )
-                if (!canEditGameRoute) {
+                if (gameRouteAppliesNextSession) {
                     Text(
-                        text = "Disconnect VPN to change; set before a match.",
+                        text = "Saved for next session; current VPN routing stays unchanged.",
                         style = TechnicalData.copy(fontSize = 9.sp),
                         color = Color(0xFFFFB300)
                     )
@@ -123,8 +127,7 @@ internal fun CountryRoutingRow(
             }
             Switch(
                 checked = viewModel.brawlStarsDirectRoutingEnabled,
-                onCheckedChange = viewModel::updateBrawlStarsDirectRoutingEnabled,
-                enabled = canEditGameRoute
+                onCheckedChange = viewModel::updateBrawlStarsDirectRoutingEnabled
             )
         }
         Spacer(modifier = Modifier.height(7.dp))

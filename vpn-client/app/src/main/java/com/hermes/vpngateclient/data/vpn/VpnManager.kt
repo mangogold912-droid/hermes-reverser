@@ -9,19 +9,28 @@ import de.blinkt.openvpn.core.OpenVPNService
 import de.blinkt.openvpn.core.ProfileManager
 import de.blinkt.openvpn.core.ProfileManager.setTemporaryProfile
 import de.blinkt.openvpn.core.VPNLaunchHelper.startOpenVpn
+import de.blinkt.openvpn.core.VpnStatus
 import java.io.StringReader
 
 class VpnManager(private val context: Context) {
 
     private val settings = context.getSharedPreferences(SETTINGS_NAME, Context.MODE_PRIVATE)
     private var activeConfig: String? = null
+    private var sessionBrawlStarsDirectRoutingEnabled: Boolean? = null
 
     /** When enabled, Brawl Stars bypasses this VPN and uses Android's active network. */
     fun isBrawlStarsDirectRoutingEnabled(): Boolean =
-        settings.getBoolean(KEY_BRAWL_STARS_DIRECT, true)
+        settings.getBoolean(KEY_BRAWL_STARS_DIRECT, false)
 
     fun setBrawlStarsDirectRoutingEnabled(enabled: Boolean) {
         settings.edit().putBoolean(KEY_BRAWL_STARS_DIRECT, enabled).apply()
+    }
+
+    /** Recover the route mode from a tunnel started by an older app process/version. */
+    private fun activeProfileDirectRoute(): Boolean? {
+        val profile = ProfileManager.getLastConnectedProfile(context) ?: return null
+        val packageListed = profile.mAllowedAppsVpn?.contains(BRAWL_STARS_PACKAGE) == true
+        return if (profile.mAllowedAppsVpnAreDisallowed) packageListed else !packageListed
     }
 
     /**
@@ -31,6 +40,18 @@ class VpnManager(private val context: Context) {
      */
     fun startVpn(base64ConfigString: String): Boolean {
         return try {
+            val existingTunnel = activeConfig != null || VpnStatus.isVPNActive()
+            val directRouteForSession = sessionBrawlStarsDirectRoutingEnabled
+                ?: if (existingTunnel) {
+                    settings.getBoolean(
+                        KEY_SESSION_BRAWL_STARS_DIRECT,
+                        activeProfileDirectRoute() ?: isBrawlStarsDirectRoutingEnabled()
+                    )
+                } else {
+                    isBrawlStarsDirectRoutingEnabled()
+                }
+            sessionBrawlStarsDirectRoutingEnabled = directRouteForSession
+            settings.edit().putBoolean(KEY_SESSION_BRAWL_STARS_DIRECT, directRouteForSession).apply()
             activeConfig = base64ConfigString
 
             val decodedBytes = Base64.decode(base64ConfigString, Base64.DEFAULT)
@@ -55,7 +76,7 @@ class VpnManager(private val context: Context) {
             profile.mPassword = "vpn"
             profile.mProfileCreator = context.packageName
 
-            if (isBrawlStarsDirectRoutingEnabled()) {
+            if (directRouteForSession) {
                 // Keep game packets on Android's active physical network so replacing
                 // a VPN Gate relay does not move the game's route between VPN exits.
                 profile.mAllowedAppsVpnAreDisallowed = true
@@ -83,6 +104,8 @@ class VpnManager(private val context: Context) {
             context.startService(disconnectIntent)
 
             activeConfig = null
+            sessionBrawlStarsDirectRoutingEnabled = null
+            settings.edit().remove(KEY_SESSION_BRAWL_STARS_DIRECT).apply()
             true
         } catch (e: Exception) {
             Log.e(TAG, "stopVpn failed", e)
@@ -92,14 +115,22 @@ class VpnManager(private val context: Context) {
 
     fun clearActiveConfig() {
         activeConfig = null
+        sessionBrawlStarsDirectRoutingEnabled = null
+        settings.edit().remove(KEY_SESSION_BRAWL_STARS_DIRECT).apply()
     }
 
     /** Tears down the tunnel but remembers its config so resume can restart it. */
     fun pauseVpn(): Boolean {
         val lastRunning = activeConfig
+        val lastRouteMode = sessionBrawlStarsDirectRoutingEnabled
         val stopped = stopVpn()
-        // Keep memory of activeConfig so resume knows which one to restart
+        // Keep the profile and per-session routing mode so resume doesn't apply a
+        // pending preference change in the middle of a game session.
         activeConfig = lastRunning
+        sessionBrawlStarsDirectRoutingEnabled = lastRouteMode
+        if (lastRouteMode != null) {
+            settings.edit().putBoolean(KEY_SESSION_BRAWL_STARS_DIRECT, lastRouteMode).apply()
+        }
         return stopped
     }
 
@@ -122,6 +153,7 @@ class VpnManager(private val context: Context) {
         private const val TAG = "VpnManager"
         private const val SETTINGS_NAME = "gatelink_settings"
         private const val KEY_BRAWL_STARS_DIRECT = "brawl_stars_direct_routing"
+        private const val KEY_SESSION_BRAWL_STARS_DIRECT = "session_brawl_stars_direct_routing"
         private const val BRAWL_STARS_PACKAGE = "com.supercell.brawlstars"
     }
 }
