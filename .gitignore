@@ -4,6 +4,9 @@ build/
 *.iml
 .idea/
 local.properties
+# Local secrets/credentials must never enter Git or release/source bundles.
+.env
+.env.*
 captures/
 .externalNativeBuild/
 .cxx/

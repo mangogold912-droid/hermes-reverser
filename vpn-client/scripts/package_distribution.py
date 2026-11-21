@@ -14,7 +14,7 @@ PROJECT = Path(__file__).resolve().parents[1]
 
 EXCLUDED_DIRS = {".git", ".gradle", "build", "distribution", "native-source", ".idea"}
 EXCLUDED_SUFFIXES = {".apk", ".aab", ".aar", ".ap_", ".class", ".dex", ".jks", ".keystore"}
-EXCLUDED_NAMES = {"local.properties", "keystore.properties", "secrets.properties"}
+EXCLUDED_NAMES = {"local.properties", "keystore.properties", "secrets.properties", ".env"}
 
 
 def include_source(path: Path) -> bool:
