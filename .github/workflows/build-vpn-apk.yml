@@ -43,6 +43,8 @@ jobs:
               tail -n 120 /tmp/gatelink-gradle-build.log
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
+            details=$(tail -n 80 /tmp/gatelink-gradle-build.log | tail -c 12000 | python3 -c 'import sys; print(sys.stdin.read().replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A"), end="")')
+            printf '::error title=Gradle%%20build%%20failure::%s\n' "$details"
             exit "$build_status"
           fi
 
