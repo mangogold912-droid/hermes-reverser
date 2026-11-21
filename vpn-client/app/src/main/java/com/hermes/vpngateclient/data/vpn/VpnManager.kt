@@ -13,7 +13,16 @@ import java.io.StringReader
 
 class VpnManager(private val context: Context) {
 
+    private val settings = context.getSharedPreferences(SETTINGS_NAME, Context.MODE_PRIVATE)
     private var activeConfig: String? = null
+
+    /** When enabled, Brawl Stars bypasses this VPN and uses Android's active network. */
+    fun isBrawlStarsDirectRoutingEnabled(): Boolean =
+        settings.getBoolean(KEY_BRAWL_STARS_DIRECT, true)
+
+    fun setBrawlStarsDirectRoutingEnabled(enabled: Boolean) {
+        settings.edit().putBoolean(KEY_BRAWL_STARS_DIRECT, enabled).apply()
+    }
 
     /**
      * Launches the OpenVPN process for the given config.
@@ -45,6 +54,13 @@ class VpnManager(private val context: Context) {
             profile.mUsername = "vpn"
             profile.mPassword = "vpn"
             profile.mProfileCreator = context.packageName
+
+            if (isBrawlStarsDirectRoutingEnabled()) {
+                // Keep game packets on Android's active physical network so replacing
+                // a VPN Gate relay does not move the game's route between VPN exits.
+                profile.mAllowedAppsVpnAreDisallowed = true
+                profile.mAllowedAppsVpn = hashSetOf(BRAWL_STARS_PACKAGE)
+            }
 
             setTemporaryProfile(context, profile)
             startOpenVpn(profile, context, "VPN Gate Connection", true)
@@ -104,5 +120,8 @@ class VpnManager(private val context: Context) {
 
     companion object {
         private const val TAG = "VpnManager"
+        private const val SETTINGS_NAME = "gatelink_settings"
+        private const val KEY_BRAWL_STARS_DIRECT = "brawl_stars_direct_routing"
+        private const val BRAWL_STARS_PACKAGE = "com.supercell.brawlstars"
     }
 }

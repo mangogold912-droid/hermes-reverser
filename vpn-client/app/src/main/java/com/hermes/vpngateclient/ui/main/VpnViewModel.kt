@@ -66,6 +66,10 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
     private val repository = VpnRepository()
     val vpnManager = VpnManager(application)
 
+    /** Game-continuity option; takes effect on the next VPN profile start. */
+    var brawlStarsDirectRoutingEnabled by mutableStateOf(vpnManager.isBrawlStarsDirectRoutingEnabled())
+        private set
+
     // ── UI State ────────────────────────────────────────────────────────────────
     var vpnStatus by mutableStateOf("Searching best servers...")
     var bestServerConfig by mutableStateOf<String?>(null)
@@ -883,6 +887,32 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setSortCriteria(sort: SortCriteria) {
         activeSort = sort
+    }
+
+    /** Configure Brawl Stars routing for the next tunnel start; never reconfigure mid-match. */
+    fun setBrawlStarsDirectRoutingEnabled(enabled: Boolean) {
+        val tunnelActive = connectionState in listOf(
+            ConnectionState.CONNECTED,
+            ConnectionState.CONNECTING,
+            ConnectionState.RECONNECTING,
+            ConnectionState.PAUSED
+        )
+        if (tunnelActive) {
+            addLog("GAME ROUTE", "Ignored route-mode change while a VPN tunnel is active; disconnect first.")
+            return
+        }
+        if (brawlStarsDirectRoutingEnabled == enabled) return
+
+        brawlStarsDirectRoutingEnabled = enabled
+        vpnManager.setBrawlStarsDirectRoutingEnabled(enabled)
+        addLog(
+            "GAME ROUTE",
+            if (enabled) {
+                "Brawl Stars will use Android's active network outside GateLink VPN on the next connection."
+            } else {
+                "Brawl Stars will use the selected VPN route on the next connection."
+            }
+        )
     }
 
     /**

@@ -16,7 +16,11 @@ VPN Gate relays are volunteered and operated by third parties. The relay operato
 
 The app fetches the public server directory from `https://www.vpngate.net/api/iphone/` and keeps every row with a usable OpenVPN profile; missing ping/speed telemetry does not hide a relay. The United States is surfaced first in country routing. Choosing a country starts a connection or switches an active tunnel to its lowest plausible **directory-reported** ping, then keeps automatic retries in that country. This is not a live latency measurement from the user's device, and the app cannot increase the number of volunteer relays VPN Gate actually publishes.
 
-Changing relays removes the app's extra stop-and-wait step and asks the OpenVPN service to replace its profile directly. The current single-process OpenVPN service stops the old process before starting the new one, so a brief tunnel/game interruption is still possible; seamless make-before-break handover is not supported or guaranteed. The app does not include an account system or a developer-operated VPN gateway.
+Changing relays removes the app's extra stop-and-wait step and asks the OpenVPN service to replace its profile directly. The current single-process OpenVPN service stops the old process before starting the new one, so a brief tunnel interruption is still possible; seamless make-before-break handover is not supported or guaranteed.
+
+The optional Brawl Stars Direct Route excludes `com.supercell.brawlstars` from the VPN on the next tunnel start, leaving the game on Android's current default network (cellular when that is the active network) while other apps use the VPN. This can keep a VPN relay switch from changing the game's route, but it does not accelerate or protect Brawl Stars through VPN Gate, does not force cellular when Wi-Fi is the system default, and cannot prevent carrier/game-server interruptions. Set the option before connecting and launching a match.
+
+The app does not include an account system or a developer-operated VPN gateway.
 
 ## Build
 

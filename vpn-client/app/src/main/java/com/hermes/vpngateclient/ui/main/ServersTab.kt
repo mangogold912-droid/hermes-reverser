@@ -32,6 +32,7 @@ import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.runtime.Composable
@@ -77,12 +78,55 @@ internal fun CountryRoutingRow(
         )
         Spacer(modifier = Modifier.height(3.dp))
         Text(
-            text = "Tap a country to connect or switch to its lowest plausible reported-ping relay; retries stay there. Switching may briefly interrupt games.",
+            text = "Tap a country to connect or switch to its lowest plausible reported-ping relay; retries stay there. Use Brawl Stars Direct Route below to keep the game off the changing VPN route.",
             style = TechnicalData.copy(fontSize = 10.sp),
             color = TextMuted,
             maxLines = 2,
             overflow = TextOverflow.Ellipsis
         )
+        Spacer(modifier = Modifier.height(7.dp))
+        val canEditGameRoute = viewModel.connectionState !in listOf(
+            ConnectionState.CONNECTED,
+            ConnectionState.CONNECTING,
+            ConnectionState.RECONNECTING,
+            ConnectionState.PAUSED
+        )
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(8.dp))
+                .background(Color(0xFF111111))
+                .border(1.dp, BorderHairline, RoundedCornerShape(8.dp))
+                .padding(start = 10.dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "BRAWL STARS · DIRECT ROUTE",
+                    style = LabelCaps.copy(fontSize = 9.sp, fontWeight = FontWeight.Bold),
+                    color = if (viewModel.brawlStarsDirectRoutingEnabled) Primary else TextMuted
+                )
+                Text(
+                    text = "On the next VPN connect, Brawl Stars uses Android's active network (cellular if selected), not VPN Gate. No VPN ping optimization or protection for the game.",
+                    style = TechnicalData.copy(fontSize = 9.sp),
+                    color = TextMuted,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+                if (!canEditGameRoute) {
+                    Text(
+                        text = "Disconnect VPN to change; set before a match.",
+                        style = TechnicalData.copy(fontSize = 9.sp),
+                        color = Color(0xFFFFB300)
+                    )
+                }
+            }
+            Switch(
+                checked = viewModel.brawlStarsDirectRoutingEnabled,
+                onCheckedChange = viewModel::setBrawlStarsDirectRoutingEnabled,
+                enabled = canEditGameRoute
+            )
+        }
         Spacer(modifier = Modifier.height(7.dp))
         LazyRow(
             modifier = Modifier.fillMaxWidth(),
