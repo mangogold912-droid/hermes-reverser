@@ -235,6 +235,7 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
     // All state transitions funnel through [transitionTo].
     private var activeIntent = ConnectionIntent.NONE
     private var connectAttempts = 0
+    private val attemptedRelayIps = mutableSetOf<String>()
 
     /** True once the current attempt produced its first OpenVPN progress event;
      *  lets us tell a dying previous session's teardown from a real failure. */
@@ -275,6 +276,8 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
                 connectionWatchdogJob?.cancel()
                 retryJob?.cancel()
                 connectAttempts = 0
+                attemptedRelayIps.clear()
+                selectedServer?.ip?.let(attemptedRelayIps::add)
                 activeIntent = ConnectionIntent.NONE
                 lastErrorHeadline = null
                 lastErrorDetail = null
@@ -349,31 +352,55 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * A connection attempt failed (or the tunnel dropped). Retry the same server a
-     * couple of times with visible status before showing the hard error banner —
-     * volunteer nodes flap, and one bad moment shouldn't look like "server down".
+     * Volunteer relays can go stale or reject authentication, so an automatic retry
+     * advances to a different untried relay instead of hammering the same IP.
      */
     private fun scheduleConnectRetry(headline: String, detail: String, dropLogLine: String) {
-        val config = bestServerConfig
-        if (config == null || connectAttempts >= MAX_CONNECT_ATTEMPTS) {
+        if (connectAttempts >= MAX_CONNECT_ATTEMPTS) {
             failConnection(
                 headline, detail,
-                "$dropLogLine Gave up after ${connectAttempts + 1} attempt(s). Please reconnect or choose another server."
+                "$dropLogLine Gave up after ${connectAttempts + 1} attempt(s). Please refresh the directory or choose another server."
             )
             return
         }
+
+        val failedServer = selectedServer
+        failedServer?.ip?.let(attemptedRelayIps::add)
+        val nextServer = fullServers
+            .asSequence()
+            .filterNot { it.ip in attemptedRelayIps }
+            .maxByOrNull { it.score }
+        if (nextServer == null) {
+            failConnection(
+                headline,
+                detail,
+                "$dropLogLine No untried relay remains. Gave up after ${connectAttempts + 1} attempt(s)."
+            )
+            return
+        }
+
+        selectedServer = nextServer
+        bestServerConfig = nextServer.openVpnConfigDataBase64
+        attemptedRelayIps.add(nextServer.ip)
+        isAutoSelectedBest = nextServer.score == (fullServers.maxOfOrNull { it.score } ?: nextServer.score)
+        val config = bestServerConfig
+        if (config == null) {
+            failConnection(headline, detail, "$dropLogLine Next relay has no OpenVPN configuration.")
+            return
+        }
+
         connectAttempts++
         stopTelemetry()
         activeIntent = ConnectionIntent.AUTO_RETRY // suppress stale teardown events while retrying
-        vpnStatus =
-            "Retrying ${selectedServer?.countryLong ?: "gateway"}... (attempt ${connectAttempts + 1}/${MAX_CONNECT_ATTEMPTS + 1})"
+        val nextAttempt = connectAttempts + 1
+        vpnStatus = "Trying ${nextServer.countryLong}... (attempt $nextAttempt/${MAX_CONNECT_ATTEMPTS + 1})"
         addLog(
             "RETRY",
-            "$dropLogLine Retrying ${selectedServer?.countryLong ?: "gateway"} (${selectedServer?.ip ?: "?"}) — attempt ${connectAttempts + 1} of ${MAX_CONNECT_ATTEMPTS + 1}."
+            "$dropLogLine Switching from ${failedServer?.ip ?: "previous relay"} to " +
+                    "${nextServer.countryLong} (${nextServer.ip}) — attempt $nextAttempt of ${MAX_CONNECT_ATTEMPTS + 1}."
         )
-        attemptLabel =
-            "RETRYING CONNECTION (${connectAttempts + 1}/${MAX_CONNECT_ATTEMPTS + 1})..."
-        transitionTo(ConnectionState.RECONNECTING, "retry ${connectAttempts}/${MAX_CONNECT_ATTEMPTS}")
+        attemptLabel = "TRYING NEXT RELAY ($nextAttempt/${MAX_CONNECT_ATTEMPTS + 1})..."
+        transitionTo(ConnectionState.RECONNECTING, "relay failover ${failedServer?.ip ?: "?"} → ${nextServer.ip}")
         val attempt = connectAttempts
         retryJob?.cancel()
         switchLaunchJob?.cancel()
@@ -383,7 +410,7 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
                 beginAttempt()
                 addLog("CONNECT", "Launching attempt ${attempt + 1} → ${selectedServer?.ip ?: "?"}...")
                 if (!vpnManager.startVpn(config)) {
-                    failConnection(headline, detail, "Retry attempt $attempt failed to launch.")
+                    failConnection(headline, detail, "Relay attempt ${attempt + 1} failed to launch.")
                 }
             }
         }
@@ -724,6 +751,8 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
 
     fun selectServer(server: VpnServer) {
         selectedServer = server
+        attemptedRelayIps.clear()
+        attemptedRelayIps.add(server.ip)
         bestServerConfig = server.openVpnConfigDataBase64
         val topScore = fullServers.maxOfOrNull { it.score } ?: 0L
         isAutoSelectedBest = (server.score == topScore)
@@ -852,6 +881,8 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
         connectionStartTime = 0L
         pausedElapsedSeconds = 0L
         totalSessionMb = 0f
+        attemptedRelayIps.clear()
+        selectedServer?.ip?.let(attemptedRelayIps::add)
         // A banner-initiated retry is single-shot: preset attempts to the max so the
         // first failure exhausts them immediately instead of auto-retrying again.
         connectAttempts = if (manualSingleShotRetry) MAX_CONNECT_ATTEMPTS else 0
