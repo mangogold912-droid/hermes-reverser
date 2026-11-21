@@ -1,0 +1,23 @@
+GATELINK VPN — THIRD-PARTY NOTICES
+
+This document accompanies the APK outside the app UI. The application and source distribution contain software from the projects listed below. Full license texts are included in LICENSE.txt and LICENSES/ inside the share bundle.
+
+1. GateLink VPN application
+   This application is derived from OpenGateVPN by Iyed Amiri, pinned to commit 12f8ea97976f1bac0307a013b40712098b865d43. The upstream project is licensed under GNU GPL version 3. This derivative remains under GPL-3.0. Changes include the Android application/package identity, branding, corrected fixed-protocol/encryption labels, a volunteer-relay safety notice, build/signing configuration, and source/distribution packaging. Upstream source: https://github.com/IyedAmiri/OpenGateVPN
+
+2. OpenVPN for Android / vpnLib
+   The bundled vpnLib Java/AIDL engine is based on the GPL-licensed OpenVPN for Android project (ics-openvpn), version 0.7.64, and the hoang-rio/vpnLib module. OpenVPN for Android is GPL version 2 or later with additional linking exceptions; see LICENSES/OPENVPN_FOR_ANDROID_LICENSE.txt. The source module license supplied by OpenGateVPN is GPL-3.0; see vpnLib/LICENSE in SOURCE_CODE.zip.
+   Upstream projects:
+   - https://github.com/hoang-rio/vpnLib
+   - https://github.com/schwabe/ics-openvpn/tree/v0.7.64
+
+3. OpenVPN native engine and bundled support code
+   The native libraries in vpnLib/src/main/jniLibs were built from the OpenVPN for Android engine and related components. The exact upstream tag and submodule revision are recorded in SOURCE_INFO.txt; the source tree can be fetched with scripts/fetch-openvpn-native-source.sh. License notices for the upstream OpenVPN, OpenSSL, LZO, Bouncy Castle, and other bundled components are in LICENSES/OPENVPN_FOR_ANDROID_THIRD_PARTY_LICENSES.txt and LICENSES/LZO_COPYING.txt.
+
+4. Android and Kotlin libraries
+   The AndroidX, Jetpack Compose, Kotlin/Kotlinx Coroutines, and Ktor dependencies are declared in gradle/libs.versions.toml and are distributed under their respective upstream licenses, primarily Apache License 2.0. The Apache License 2.0 text is in LICENSES/APACHE-2.0.txt. JUnit 4 is a test-only dependency under EPL-1.0; its license text is in LICENSES/EPL-1.0.txt. The Gradle wrapper is distributed under Apache License 2.0. Their upstream copyright and license notices remain applicable.
+
+5. VPN Gate service
+   VPN Gate is a volunteer relay network and directory service, not a software library bundled by this project. The app queries its public directory at https://www.vpngate.net/api/iphone/ and connects to relays listed there. VPN Gate is not affiliated with this app.
+
+No license screen or source-code menu is added to the app. These notices and the source archive are provided alongside the APK in the share bundle.

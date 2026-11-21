@@ -1,0 +1,15 @@
+GATELINK VPN — INSTALLATION
+
+1. Extract GateLinkVPN-Bundle.zip.
+2. On the Android device, open GateLinkVPN.apk.
+3. If Android asks, allow the file manager/browser to install unknown apps, then confirm installation.
+4. Open GateLink VPN and wait for the public server list to load.
+5. Tap Connect. On first use, approve Android's system VPN permission prompt.
+
+No VPN configuration file or companion VPN app is required.
+
+The app uses volunteer-operated VPN Gate relays. Relay operators may observe traffic metadata. Avoid sensitive traffic. Availability and game latency are not guaranteed.
+
+The APK is debug-signed for this development build. Android may require uninstalling it before installing an APK built with a different signing key. Releasing updates without uninstalling requires one stable release keystore to be kept private and reused.
+
+This folder also contains LICENSE.txt, THIRD_PARTY_NOTICES.txt, LICENSES/*.txt, SOURCE_INFO.txt, and SOURCE_CODE.zip. These are distributed separately from the app UI.

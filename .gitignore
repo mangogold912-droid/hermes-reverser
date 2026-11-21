@@ -10,3 +10,7 @@ captures/
 *.apk
 *.ap_
 *.aab
+vpn-client/distribution/
+vpn-client/keystore.properties
+vpn-client/*.jks
+vpn-client/*.keystore

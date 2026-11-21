@@ -1,0 +1,29 @@
+GATELINK VPN — SOURCE INFORMATION
+
+Application source
+------------------
+This project is derived from OpenGateVPN:
+  Repository: https://github.com/IyedAmiri/OpenGateVPN
+  Pinned commit: 12f8ea97976f1bac0307a013b40712098b865d43
+  License: GNU GPL version 3 (see LICENSE)
+
+The APK's matching application sources, Gradle files, Java/Kotlin code, Android resources, and bundled native libraries are included in SOURCE_CODE.zip.
+
+OpenVPN engine source
+---------------------
+The vpnLib module identifies OpenVPN for Android version 0.7.64 as its source. The upstream tag resolves to commit:
+  73ce3c99dde39207990d66c21be8201228cd1f09
+
+The tag uses Git submodules for native OpenVPN, OpenVPN 3, OpenSSL, mbedTLS, ASIO, LZ4, fmt, and related source. The codeload archive does not include Git submodule contents. To obtain the matching native source tree with the submodules, run:
+  ./scripts/fetch-openvpn-native-source.sh
+
+The OpenVPN for Android license and third-party license texts are included in LICENSES/. The bundled native binaries are under vpnLib/src/main/jniLibs/.
+
+Build inputs
+------------
+Gradle wrapper distribution: 9.5.0 (see gradle/wrapper/gradle-wrapper.properties)
+Android application ID: com.hermes.vpngateclient
+Android minSdk: 24
+Android target/compile SDK: 37
+
+The APK in a share bundle is debug-signed for installation/testing. A new CI build may have a different debug signing key; see INSTALL.txt before updating an already-installed copy.

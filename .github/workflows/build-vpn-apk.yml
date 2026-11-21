@@ -1,0 +1,58 @@
+name: Build GateLink VPN APK
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'vpn-client/**'
+      - '.github/workflows/build-vpn-apk.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK Platform 37
+        run: |
+          yes | sdkmanager --licenses >/dev/null
+          sdkmanager 'platforms;android-37' 'platform-tools'
+
+      - name: Run unit tests and build installable APK
+        working-directory: vpn-client
+        run: ./gradlew --no-daemon testDebugUnitTest assembleDebug
+
+      - name: Package APK with external notices and source
+        working-directory: vpn-client
+        run: |
+          python3 scripts/package_distribution.py \
+            --apk app/build/outputs/apk/debug/app-debug.apk \
+            --out distribution/GateLinkVPN-Bundle.zip
+          sha256sum app/build/outputs/apk/debug/app-debug.apk distribution/GateLinkVPN-Bundle.zip
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: GateLinkVPN-APK
+          path: vpn-client/app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 90
+
+      - name: Upload share bundle (APK + TXT notices + source)
+        uses: actions/upload-artifact@v4
+        with:
+          name: GateLinkVPN-Bundle
+          path: vpn-client/distribution/GateLinkVPN-Bundle.zip
+          retention-days: 90
