@@ -18,7 +18,7 @@ The app fetches its public server directory from `https://www.vpngate.net/api/ip
 
 ## Build
 
-Requirements: JDK 21 and Android SDK Platform 37. The project includes the Gradle wrapper.
+Requirements: JDK 21 and Android SDK Platform 36. The project includes the Gradle wrapper.
 
 ```bash
 ./gradlew testDebugUnitTest assembleDebug

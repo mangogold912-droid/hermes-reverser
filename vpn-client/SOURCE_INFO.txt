@@ -24,6 +24,6 @@ Build inputs
 Gradle wrapper distribution: 9.5.0 (see gradle/wrapper/gradle-wrapper.properties)
 Android application ID: com.hermes.vpngateclient
 Android minSdk: 24
-Android target/compile SDK: 37
+Android target/compile SDK: 36
 
 The APK in a share bundle is debug-signed for installation/testing. A new CI build may have a different debug signing key; see INSTALL.txt before updating an already-installed copy.
