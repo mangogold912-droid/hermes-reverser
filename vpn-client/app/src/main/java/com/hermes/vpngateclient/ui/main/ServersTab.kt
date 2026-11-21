@@ -123,7 +123,7 @@ internal fun CountryRoutingRow(
             }
             Switch(
                 checked = viewModel.brawlStarsDirectRoutingEnabled,
-                onCheckedChange = viewModel::setBrawlStarsDirectRoutingEnabled,
+                onCheckedChange = viewModel::updateBrawlStarsDirectRoutingEnabled,
                 enabled = canEditGameRoute
             )
         }

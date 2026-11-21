@@ -890,7 +890,7 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /** Configure Brawl Stars routing for the next tunnel start; never reconfigure mid-match. */
-    fun setBrawlStarsDirectRoutingEnabled(enabled: Boolean) {
+    fun updateBrawlStarsDirectRoutingEnabled(enabled: Boolean) {
         val tunnelActive = connectionState in listOf(
             ConnectionState.CONNECTED,
             ConnectionState.CONNECTING,
