@@ -31,7 +31,20 @@ jobs:
 
       - name: Run unit tests and build installable APK
         working-directory: vpn-client
-        run: ./gradlew --no-daemon testDebugUnitTest assembleDebug
+        shell: bash
+        run: |
+          set -o pipefail
+          ./gradlew --no-daemon testDebugUnitTest assembleDebug 2>&1 | tee /tmp/gatelink-gradle-build.log
+          build_status=$?
+          if [ "$build_status" -ne 0 ]; then
+            {
+              echo '## Gradle build failure details'
+              echo '```text'
+              tail -n 120 /tmp/gatelink-gradle-build.log
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit "$build_status"
+          fi
 
       - name: Package APK with external notices and source
         working-directory: vpn-client
