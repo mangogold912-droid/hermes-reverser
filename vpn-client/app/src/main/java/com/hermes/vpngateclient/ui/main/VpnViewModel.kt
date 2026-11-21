@@ -558,6 +558,22 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
 
     // ── Server directory loading ────────────────────────────────────────────────
 
+    private fun describeNetworkFailure(error: Throwable?): String {
+        if (error == null) return "unknown network error"
+        return generateSequence(error) { it.cause }
+            .take(4)
+            .map { cause ->
+                val type = cause.javaClass.simpleName.ifBlank { "NetworkException" }
+                val message = cause.message
+                    ?.replace(Regex("\\s+"), " ")
+                    ?.trim()
+                    ?.take(180)
+                if (message.isNullOrBlank()) type else "$type: $message"
+            }
+            .distinct()
+            .joinToString(" caused by ")
+    }
+
     fun loadServers() {
         val gen = ++loadGeneration
         loadJob?.cancel() // never let two fetches race; stale results are discarded below
@@ -603,17 +619,17 @@ class VpnViewModel(application: Application) : AndroidViewModel(application) {
                         )
                     }
                     is VpnGateResult.NetworkError -> {
-                        lastLoadError = "Could not reach vpngate.net — check internet connectivity"
+                        val causeDesc = describeNetworkFailure(result.cause)
+                        lastLoadError = "Network error: $causeDesc. Try another network, then refresh."
                         if (!isTunnelActive && connectionState == ConnectionState.SEARCHING_NODES) {
                             transitionTo(ConnectionState.ERROR, "directory fetch failed")
                         }
-                        val causeDesc = result.cause?.let { " (${it.javaClass.simpleName})" } ?: ""
                         if (isTunnelActive) {
-                            addLog("ERROR", "Refresh failed$causeDesc after ${fetchDurationMs}ms — tunnel unaffected.")
+                            addLog("ERROR", "Refresh failed ($causeDesc) after ${fetchDurationMs}ms — tunnel unaffected.")
                         } else {
                             addLog(
                                 "ERROR",
-                                "API request failed$causeDesc after ${fetchDurationMs}ms. Check internet connectivity, then refresh."
+                                "API request failed ($causeDesc) after ${fetchDurationMs}ms. Check network access to vpngate.net, then refresh."
                             )
                         }
                     }

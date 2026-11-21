@@ -6,8 +6,11 @@ import io.ktor.client.HttpClient
 import io.ktor.client.engine.android.Android
 import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.request.get
+import io.ktor.client.request.header
 import io.ktor.client.statement.bodyAsText
+import io.ktor.http.HttpHeaders
 import java.io.BufferedReader
+import java.io.IOException
 import java.io.StringReader
 
 /**
@@ -38,9 +41,15 @@ class VpnGateApi {
 
     /** Fetches the raw CSV. Throws on network failure so callers can tell errors from empty feeds. */
     suspend fun fetchVpnGate(): String {
-        val response = client.get("https://www.vpngate.net/api/iphone/")
+        val response = client.get("https://www.vpngate.net/api/iphone/") {
+            header(HttpHeaders.UserAgent, "GateLinkVPN/1.0 (Android)")
+            header(HttpHeaders.Accept, "text/csv, text/plain;q=0.9, */*;q=0.8")
+        }
+        if (response.status.value !in 200..299) {
+            throw IOException("VPN Gate directory returned HTTP ${response.status.value}")
+        }
         val rawData = response.bodyAsText()
-        Log.d("VPN_Gate_REQUEST", "Fetched successfully")
+        Log.d("VPN_Gate_REQUEST", "Fetched successfully (${rawData.length} characters)")
         return rawData
     }
 
