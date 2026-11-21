@@ -33,6 +33,7 @@ jobs:
         working-directory: vpn-client
         shell: bash
         run: |
+          set +e
           set -o pipefail
           ./gradlew --no-daemon testDebugUnitTest assembleDebug 2>&1 | tee /tmp/gatelink-gradle-build.log
           build_status=$?
